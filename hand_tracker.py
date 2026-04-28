@@ -22,6 +22,7 @@ _MODEL_PATH = Path(__file__).parent / "assets" / "hand_landmarker.task"
 PINCH_THRESHOLD_PX  = 28   # fingertips must actually touch
 LANDMARK_DOT_RADIUS = 5
 ACTIVE_TIP_RADIUS   = 12
+PINCH_COLOUR        = (80, 255, 160)   # BGR — left-hand pinch highlight
 
 # Hand bone connections (landmark index pairs)
 HAND_CONNECTIONS = [
@@ -106,27 +107,42 @@ class HandTracker:
             col     = COLOUR[label]
 
             index_tip  = lm_pixels[8]
-            middle_tip = lm_pixels[12]   # kept for HandData API compatibility
+            middle_tip = lm_pixels[12]
+
+            # Pinch: index tip and middle tip close together (left hand only)
+            pinch_active = (
+                label == "Left"
+                and _distance(index_tip, middle_tip) < PINCH_THRESHOLD_PX
+            )
 
             # Draw bone connections
             for a, b in HAND_CONNECTIONS:
                 cv2.line(frame_bgr, lm_pixels[a], lm_pixels[b],
                          col["line"], 2, cv2.LINE_AA)
 
-            # Draw all 21 landmark dots (including middle tip as normal dot)
+            # Draw all 21 landmark dots; skip 8 (and 12 when pinching) below
+            skip = {8, 12} if pinch_active else {8}
             for i, pt in enumerate(lm_pixels):
-                if i == 8:
-                    continue  # drawn separately below
+                if i in skip:
+                    continue
                 cv2.circle(frame_bgr, pt, LANDMARK_DOT_RADIUS,
                            col["dot"], -1, cv2.LINE_AA)
                 cv2.circle(frame_bgr, pt, LANDMARK_DOT_RADIUS,
                            (255, 255, 255), 1, cv2.LINE_AA)
 
-            # Overdraw index tip only — the active pointer
-            cv2.circle(frame_bgr, index_tip, ACTIVE_TIP_RADIUS,
-                       col["tip"], -1, cv2.LINE_AA)
-            cv2.circle(frame_bgr, index_tip, ACTIVE_TIP_RADIUS,
-                       (255, 255, 255), 2, cv2.LINE_AA)
+            if pinch_active:
+                # Both pinched tips share the same highlight colour
+                for pt in (index_tip, middle_tip):
+                    cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
+                               PINCH_COLOUR, -1, cv2.LINE_AA)
+                    cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
+                               (255, 255, 255), 2, cv2.LINE_AA)
+            else:
+                # Normal: overdraw index tip as the active pointer
+                cv2.circle(frame_bgr, index_tip, ACTIVE_TIP_RADIUS,
+                           col["tip"], -1, cv2.LINE_AA)
+                cv2.circle(frame_bgr, index_tip, ACTIVE_TIP_RADIUS,
+                           (255, 255, 255), 2, cv2.LINE_AA)
 
             # Wrist label
             wrist = lm_pixels[0]
@@ -141,6 +157,7 @@ class HandTracker:
                 index_tip=index_tip,
                 middle_tip=middle_tip,
                 landmarks=lm_pixels,
+                pinch_active=pinch_active,
             ))
 
         return frame_bgr, hand_data_list

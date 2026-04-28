@@ -11,7 +11,8 @@ import numpy as np
 from hand_tracker import HandTracker
 from ui_circles   import draw_circles, angle_to_segment, ROOT_LABELS, TYPE_LABELS, _draw_text_pil, _FONT_LG, _FONT_SM
 from ui_buttons   import (draw_buttons, get_hovered_button,
-                           draw_beat_button, get_hovered_beat_button)
+                           draw_beat_button, get_hovered_beat_button,
+                           draw_mode_button, get_hovered_mode_button)
 from chord_engine  import ChordEngine
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -21,18 +22,26 @@ CAM_INDEX          = 1
 TARGET_W, TARGET_H = 1280, 720
 SILENCE_FRAMES     = 6    # frames before auto-silence (~200ms at 30fps)
 
+# Left-hand pinch → flatten the root by one semitone
+FLAT_MAP = {"A": "Ab", "B": "Bb", "C": "Cb", "D": "Db",
+            "E": "Eb", "F": "Fb", "G": "Gb"}
+
 # ── HUD ────────────────────────────────────────────────────────────────────────
 
-def _draw_hud(frame: np.ndarray, left_seg: int, right_seg: int) -> np.ndarray:
+def _draw_hud(frame: np.ndarray, left_seg: int, right_seg: int,
+              root_override: str = "", use_synth: bool = False) -> np.ndarray:
     h, w = frame.shape[:2]
-    root_label = ROOT_LABELS[left_seg]  if left_seg  != -1 else "—"
+    root_label = root_override if root_override else (ROOT_LABELS[left_seg] if left_seg != -1 else "—")
     type_label = TYPE_LABELS[right_seg] if right_seg != -1 else "—"
+    mode_label = "SYN" if use_synth else "IAC"
+    mode_col   = (100, 220, 100) if use_synth else (40, 160, 235)
 
     bar = frame.copy()
     cv2.rectangle(bar, (0, 0), (w, 52), (15, 15, 15), -1)
     cv2.addWeighted(bar, 0.65, frame, 0.35, 0, frame)
 
     frame = _draw_text_pil(frame, f"{root_label}  {type_label}", (w // 2, 26), _FONT_LG, (230, 230, 230))
+    frame = _draw_text_pil(frame, mode_label, (w - 48, 26), _FONT_SM, mode_col)
     frame = _draw_text_pil(frame, "Point index finger into a segment to play   |   Q = quit",
                            (w // 2, h - 18), _FONT_SM, (0, 0, 0))
     return frame
@@ -62,9 +71,10 @@ def main() -> None:
     cv2.resizeWindow(WINDOW_NAME, TARGET_W, TARGET_H)
 
     # Chord follow-finger state
-    prev_left_seg   = -1
-    prev_right_seg  = -1
-    silence_counter = 0
+    prev_left_seg    = -1
+    prev_right_seg   = -1
+    prev_pinch_active = False
+    silence_counter  = 0
 
     # Instrument buttons — radio: only one layer active at a time (-1 = none)
     active_layer  = -1
@@ -73,6 +83,10 @@ def main() -> None:
     # Jersey beat button — independent toggle
     beat_active  = False
     beat_was_in  = False
+
+    # Output mode toggle — Logic (IAC) vs built-in Synth
+    synth_mode   = False
+    mode_was_in  = False
 
     print("Conductor running — point fingers at circles to play, hover buttons (bottom-right) to layer instruments.")
     print("Press Q or ESC to quit.\n")
@@ -131,6 +145,19 @@ def main() -> None:
             print(f"  Beat {'ON' if beat_active else 'OFF'}")
         beat_was_in = beat_hovered
 
+        # ── Mode toggle button ─────────────────────────────────────────
+        mode_hovered = any(get_hovered_mode_button(tip, w, h) for tip in finger_tips)
+        if mode_hovered and not mode_was_in:          # rising edge
+            synth_mode = not synth_mode
+            engine.set_output_mode(synth_mode)
+            # Force re-trigger so the new output plays immediately
+            prev_left_seg  = -1
+            prev_right_seg = -1
+        mode_was_in = mode_hovered
+
+        # ── Pinch state (left hand only) ───────────────────────────────
+        pinch_active = left.pinch_active if left else False
+
         # ── Chord audio logic ──────────────────────────────────────────
         if left_seg == -1 and right_seg == -1:
             silence_counter += 1
@@ -138,15 +165,19 @@ def main() -> None:
                 engine.all_notes_off()
         else:
             silence_counter = 0
-            if left_seg != prev_left_seg or right_seg != prev_right_seg:
+            seg_changed   = left_seg != prev_left_seg or right_seg != prev_right_seg
+            pinch_changed = pinch_active != prev_pinch_active
+            if seg_changed or pinch_changed:
                 if left_seg != -1 and right_seg != -1:
                     root  = ROOT_LABELS[left_seg]
+                    root  = FLAT_MAP[root] if pinch_active else root
                     ctype = TYPE_LABELS[right_seg]
                     engine.play(root, ctype)
                     print(f"  {root} {ctype}")
 
-        prev_left_seg  = left_seg
-        prev_right_seg = right_seg
+        prev_left_seg     = left_seg
+        prev_right_seg    = right_seg
+        prev_pinch_active = pinch_active
 
         # ── Draw ───────────────────────────────────────────────────────
         frame = draw_circles(
@@ -159,7 +190,10 @@ def main() -> None:
         btn_active_flags = [i == active_layer for i in range(3)]
         frame = draw_buttons(frame, btn_active_flags, btn_hovered)
         frame = draw_beat_button(frame, beat_active, beat_hovered)
-        frame = _draw_hud(frame, left_seg, right_seg)
+        frame = draw_mode_button(frame, synth_mode, mode_hovered)
+
+        hud_root = FLAT_MAP[ROOT_LABELS[left_seg]] if (left_seg != -1 and pinch_active) else ""
+        frame = _draw_hud(frame, left_seg, right_seg, root_override=hud_root, use_synth=synth_mode)
 
         cv2.imshow(WINDOW_NAME, frame)
         if cv2.waitKey(1) & 0xFF in (ord("q"), ord("Q"), 27):

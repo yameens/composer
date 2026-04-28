@@ -1,2 +1,1 @@
-use the hands to create any chord progression. 
-a. 
+educational tool to learn the theory behind chords, with your hands!

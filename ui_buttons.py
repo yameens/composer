@@ -109,6 +109,53 @@ def draw_beat_button(
     cv2.addWeighted(overlay, 1.0, frame, 0.0, 0, frame)
     return frame
 
+# ── Mode toggle button — below left root circle ───────────────────────────────
+# Position: (w//4, h//2 + MODE_BTN_Y_OFFSET)
+# L = Logic/IAC mode (orange)   S = Synth/FluidSynth mode (green)
+
+MODE_BTN_RADIUS   = 22
+MODE_BTN_Y_OFFSET = 260   # circle RADIUS=200 + 60 px padding
+
+_C_MODE_LOGIC      = ( 40, 160, 235)   # BGR orange
+_C_MODE_LOGIC_HOV  = ( 20, 100, 200)
+_C_MODE_SYNTH      = (100, 220, 100)   # BGR green
+_C_MODE_SYNTH_HOV  = ( 60, 160,  60)
+
+def get_hovered_mode_button(tip: tuple[int, int], w: int, h: int) -> bool:
+    """Return True if the fingertip is inside the mode toggle button."""
+    cx = w // 4
+    cy = h // 2 + MODE_BTN_Y_OFFSET
+    return math.hypot(tip[0] - cx, tip[1] - cy) <= MODE_BTN_RADIUS
+
+def draw_mode_button(
+    frame:     np.ndarray,
+    use_synth: bool,
+    hovered:   bool,
+) -> np.ndarray:
+    """Draw the Logic/Synth mode toggle button below the left root circle."""
+    h, w   = frame.shape[:2]
+    cx     = w // 4
+    cy     = h // 2 + MODE_BTN_Y_OFFSET
+    overlay = frame.copy()
+
+    if use_synth:
+        fill = _C_MODE_SYNTH_HOV if hovered else _C_MODE_SYNTH
+        label = "SYN"
+    else:
+        fill = _C_MODE_LOGIC_HOV if hovered else _C_MODE_LOGIC
+        label = "IAC"
+
+    _filled_circle(overlay, cx, cy, fill, alpha=0.85, radius=MODE_BTN_RADIUS)
+    cv2.circle(overlay, (cx, cy), MODE_BTN_RADIUS, (255, 255, 255), 2, cv2.LINE_AA)
+    cv2.putText(
+        overlay, label,
+        (cx - 14, cy + 5),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA,
+    )
+
+    cv2.addWeighted(overlay, 1.0, frame, 0.0, 0, frame)
+    return frame
+
 # ── Helper ────────────────────────────────────────────────────────────────────
 
 def _filled_circle(
@@ -116,8 +163,9 @@ def _filled_circle(
     cx: int, cy: int,
     colour: tuple[int, int, int],
     alpha: float,
+    radius: int = BTN_RADIUS,
 ) -> None:
     """Draw a semi-transparent filled circle in-place on img."""
     temp = img.copy()
-    cv2.circle(temp, (cx, cy), BTN_RADIUS, colour, thickness=-1, lineType=cv2.LINE_AA)
+    cv2.circle(temp, (cx, cy), radius, colour, thickness=-1, lineType=cv2.LINE_AA)
     cv2.addWeighted(temp, alpha, img, 1 - alpha, 0, img)

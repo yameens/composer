@@ -19,7 +19,7 @@ _BEAT_SF2 = Path(__file__).parent / "soundfonts" / "FluidR3_GM.sf2"
 
 # ── Timing ────────────────────────────────────────────────────────────────────
 
-RELEASE_MS = 180    # ms before old notes are released
+RELEASE_MS = 80     # ms before old notes are released
 VELOCITY   = 82     # MIDI velocity (0–127)
 
 # ── MIDI channels ─────────────────────────────────────────────────────────────
@@ -47,6 +47,8 @@ LAYERS = [
 
 BEAT_BPM       = 130
 DRUM_CHANNEL   = 9    # Logic ch 10 — Drum Kit Designer / UltraBeat
+SYNTH_CHANNEL  = 0    # FluidSynth channel for chords (drums stay on ch 9)
+SYNTH_PROGRAMS = [0, 48, 89]   # Piano, String Ensemble 1, Pad 2 Warm
 KICK_NOTE      = 36   # Bass Drum 1
 KICK_VELOCITY  = 110
 KICK_RELEASE_S = 0.05
@@ -56,8 +58,9 @@ _STEP_S        = 60.0 / (BEAT_BPM * 4)   # ≈ 0.1154 s per 16th note
 # ── Chord tables ──────────────────────────────────────────────────────────────
 
 ROOT_MIDI: dict[str, int] = {
-    "A": 69, "B": 71, "C": 60,
-    "D": 62, "E": 64, "F": 65, "G": 67,
+    "A": 69, "B": 71, "C": 60, "D": 62, "E": 64, "F": 65, "G": 67,
+    # flat counterparts (natural − 1 semitone)
+    "Ab": 68, "Bb": 70, "Cb": 59, "Db": 61, "Eb": 63, "Fb": 64, "Gb": 66,
 }
 
 CHORD_INTERVALS: dict[str, list[int]] = {
@@ -97,6 +100,11 @@ class ChordEngine:
         self._beat_running = False
         self._beat_thread: Optional[threading.Thread] = None
         self._beat_fs: Optional[fluidsynth.Synth] = None
+        self._sfid: Optional[int] = None
+
+        self._use_synth    = False
+        self._synth_preset = 0
+        self._synth_active: list[int] = []
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -112,18 +120,23 @@ class ChordEngine:
         print(f"  Opening MIDI port: {iac_ports[0]}")
         self._port = mido.open_output(iac_ports[0])
 
-        # Independent FluidSynth instance — drums only (not routed through Logic)
+        # FluidSynth instance — drums (ch 9) + built-in chord synth (ch 0)
         self._beat_fs = fluidsynth.Synth(gain=0.7)
         self._beat_fs.start(driver="coreaudio")
-        _sfid = self._beat_fs.sfload(str(_BEAT_SF2))
-        self._beat_fs.program_select(DRUM_CHANNEL, _sfid, 128, 0)  # GM Standard Kit
+        self._sfid = self._beat_fs.sfload(str(_BEAT_SF2))
+        self._beat_fs.program_select(DRUM_CHANNEL, self._sfid, 128, 0)   # GM Standard Kit
+        self._beat_fs.program_select(SYNTH_CHANNEL, self._sfid, 0, SYNTH_PROGRAMS[0])  # Piano
         time.sleep(0.25)   # let CoreAudio settle before first note
-        print(f"  FluidSynth drum engine ready (sfid={_sfid})")
+        print(f"  FluidSynth ready (sfid={self._sfid}) — drums ch9, chord synth ch0")
 
     def stop(self) -> None:
         self._beat_running = False
         with self._lock:
             self._kill_all()
+            for n in self._synth_active:
+                if self._beat_fs:
+                    self._beat_fs.noteoff(SYNTH_CHANNEL, n)
+            self._synth_active = []
         time.sleep(0.1)
         if self._port:
             self._port.close()
@@ -132,14 +145,71 @@ class ChordEngine:
             self._beat_fs.delete()
             self._beat_fs = None
 
+    # ── Output mode ────────────────────────────────────────────────────────
+
+    def set_output_mode(self, use_synth: bool) -> None:
+        """Switch between Logic/IAC (use_synth=False) and built-in FluidSynth (use_synth=True)."""
+        with self._lock:
+            # Kill whatever is currently playing
+            if self._use_synth:
+                for n in self._synth_active:
+                    if self._beat_fs:
+                        self._beat_fs.noteoff(SYNTH_CHANNEL, n)
+                self._synth_active = []
+            else:
+                self._kill_all()
+                for ch in self._active:
+                    self._active[ch] = []
+
+            self._use_synth   = use_synth
+            self._current_chord = None   # force re-play on next chord event
+
+            if use_synth and self._beat_fs and self._sfid is not None:
+                self._beat_fs.program_select(
+                    SYNTH_CHANNEL, self._sfid, 0, SYNTH_PROGRAMS[self._synth_preset]
+                )
+                print(f"  → Synth mode (GM program {SYNTH_PROGRAMS[self._synth_preset]})")
+            else:
+                print("  → Logic mode (IAC MIDI)")
+
     # ── Layer toggle ───────────────────────────────────────────────────────
 
     def set_layer(self, idx: int, active: bool) -> None:
-        """Enable or disable one instrument layer. Layers replace the main channel."""
+        """Enable or disable one instrument layer / GM preset slot."""
         if idx < 0 or idx >= len(LAYERS):
             return
         with self._lock:
             self._layer_on[idx] = active
+
+            # ── Synth mode: buttons select GM program, not MIDI channel ──────
+            if self._use_synth:
+                if active:
+                    self._synth_preset = idx
+                    if self._beat_fs and self._sfid is not None:
+                        self._beat_fs.program_select(
+                            SYNTH_CHANNEL, self._sfid, 0, SYNTH_PROGRAMS[idx]
+                        )
+                    # Re-trigger chord with the new sound
+                    if self._current_chord is not None:
+                        root, ctype = self._current_chord
+                        notes = chord_notes(root, ctype)
+                        for n in self._synth_active:
+                            if self._beat_fs:
+                                self._beat_fs.noteoff(SYNTH_CHANNEL, n)
+                        for n in notes:
+                            if self._beat_fs:
+                                self._beat_fs.noteon(SYNTH_CHANNEL, n, VELOCITY)
+                        self._synth_active = notes
+                else:
+                    # Deselected — revert to Piano
+                    self._synth_preset = 0
+                    if self._beat_fs and self._sfid is not None:
+                        self._beat_fs.program_select(
+                            SYNTH_CHANNEL, self._sfid, 0, SYNTH_PROGRAMS[0]
+                        )
+                return
+
+            # ── Logic mode: original MIDI channel routing ─────────────────────
             ch = LAYERS[idx]["ch"]
             any_layer_on = any(self._layer_on)
 
@@ -201,7 +271,7 @@ class ChordEngine:
     # ── Playback ───────────────────────────────────────────────────────────
 
     def play(self, root: str, chord_type: str) -> None:
-        if self._port is None:
+        if self._port is None and not self._use_synth:
             raise RuntimeError("Call start() before play().")
 
         new_chord = (root, chord_type)
@@ -214,6 +284,24 @@ class ChordEngine:
         with self._lock:
             self._current_chord = new_chord
 
+            # ── Synth path ────────────────────────────────────────────────────
+            if self._use_synth:
+                if self._beat_fs is None:
+                    return
+                old_synth = self._synth_active
+                self._synth_active = new_notes
+                for n in new_notes:
+                    self._beat_fs.noteon(SYNTH_CHANNEL, n, VELOCITY)
+                to_kill = [n for n in old_synth if n not in new_set]
+                if to_kill:
+                    threading.Timer(
+                        RELEASE_MS / 1000.0,
+                        self._synth_noteoff_notes,
+                        args=(to_kill,),
+                    ).start()
+                return
+
+            # ── Logic/MIDI path ───────────────────────────────────────────────
             # Main channel — only when no layer is active
             if not any(self._layer_on):
                 old_main = self._active[MAIN_CHANNEL]
@@ -252,6 +340,10 @@ class ChordEngine:
             self._kill_all()
             for ch in self._active:
                 self._active[ch] = []
+            for n in self._synth_active:
+                if self._beat_fs:
+                    self._beat_fs.noteoff(SYNTH_CHANNEL, n)
+            self._synth_active = []
             self._current_chord = None
 
     # ── Internals ──────────────────────────────────────────────────────────
@@ -279,6 +371,14 @@ class ChordEngine:
     def _kill_channel_notes(self, ch: int, notes: list[int]) -> None:
         for n in notes:
             self._noteoff(ch, n)
+        if self._port:
+            self._port.send(mido.Message("control_change", channel=ch, control=64, value=0))
+            self._port.send(mido.Message("control_change", channel=ch, control=123, value=0))
+
+    def _synth_noteoff_notes(self, notes: list[int]) -> None:
+        if self._beat_fs:
+            for n in notes:
+                self._beat_fs.noteoff(SYNTH_CHANNEL, n)
 
     @property
     def current_chord(self) -> Optional[tuple[str, str]]:
