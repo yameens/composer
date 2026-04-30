@@ -8,21 +8,53 @@ import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import cv2
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 
+from ui_circles import _draw_text_pil, app_font
+
+_FONT_WRIST = app_font(20)
+_FONT_DEBUG = app_font(18)
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 _MODEL_PATH = Path(__file__).parent / "assets" / "hand_landmarker.task"
 
-PINCH_THRESHOLD_PX  = 28   # fingertips must actually touch
+# Index–middle pinch in world space (meters) when hand_world_landmarks is available
+WORLD_PINCH_FLOOR_M      = 0.028   # max tip separation (index 8 ↔ middle 12) for “touching”
+WORLD_PINCH_PALM_FRAC    = 0.15    # threshold scales with wrist→middle-MCP length
+
+# Fallback: normalized landmark x,y,z
+NORM_PINCH_FLOOR         = 0.035
+NORM_PINCH_PALM_FRAC     = 0.15
+
+# Pointing guard: index MCP→tip should be long enough we are not a closed fist…
+WORLD_INDEX_EXTEND_FLOOR_M   = 0.028
+WORLD_INDEX_EXTEND_PALM_FRAC = 0.26
+NORM_INDEX_EXTEND_FLOOR      = 0.042
+NORM_INDEX_EXTEND_PALM_FRAC  = 0.26
+
+# …unless index+middle are already tight (bypass ratio of thresh).
+PINCH_TIGHT_BYPASS_FRAC = 0.72
+
+# Middle MCP→tip longer than this ⇒ middle is “pointing” with index → ignore IM pinch unless tight.
+WORLD_MIDDLE_MAX_LEN_M    = 0.054
+WORLD_MIDDLE_MAX_LEN_FRAC = 0.48
+NORM_MIDDLE_MAX_LEN       = 0.078
+NORM_MIDDLE_MAX_LEN_FRAC  = 0.48
+
+# b9: index–middle pinch plus middle–ring cluster
+TRIPLE_THRESH_MULT = 1.08
+
+PINCH_ON_FRAMES        = 2
+PINCH_OFF_FRAMES       = 5
 LANDMARK_DOT_RADIUS = 5
 ACTIVE_TIP_RADIUS   = 12
-PINCH_COLOUR        = (80, 255, 160)   # BGR — left-hand pinch highlight
+PINCH_COLOUR        = (0, 215, 255)    # BGR gold — pinch highlight
 
 # Hand bone connections (landmark index pairs)
 HAND_CONNECTIONS = [
@@ -34,21 +66,32 @@ HAND_CONNECTIONS = [
     (0, 17), (2, 5), (5, 9), (9, 13), (13, 17),  # palm
 ]
 
-# Per-hand colours (BGR)
+# Per-hand colours (BGR) — black/dark theme
 COLOUR = {
-    "Left":  {"line": (255, 180,  60), "dot": (255, 220, 120), "tip": ( 60, 220, 255)},
-    "Right": {"line": ( 60, 180, 255), "dot": (120, 200, 255), "tip": (255,  80, 160)},
+    "Left":  {"line": (30, 30, 30), "dot": (55, 55, 55), "tip": (55, 55, 55)},
+    "Right": {"line": (30, 30, 30), "dot": (55, 55, 55), "tip": (55, 55, 55)},
 }
 
 # ── Data model ────────────────────────────────────────────────────────────────
 
 @dataclass
 class HandData:
-    label:      str                       # 'Left' or 'Right'
-    index_tip:  tuple[int, int]           # landmark 8  (pixel coords)
-    middle_tip: tuple[int, int]           # landmark 12 (pixel coords)
-    landmarks:  list[tuple[int, int]]     # all 21 landmarks (pixel coords)
-    pinch_active: bool = False
+    label:        str                     # screen-side: Left = left half / leftmost of two
+    index_tip:    tuple[int, int]         # landmark 8  (pixel coords)
+    middle_tip:   tuple[int, int]         # landmark 12 (pixel coords)
+    ring_tip:     tuple[int, int]         # landmark 16 (pixel coords)
+    landmarks:    list[tuple[int, int]]   # all 21 landmarks (pixel coords)
+    pinch_active: bool = False            # debounced index+middle pinch (+ pointing/curl guard)
+    pinch_triple: bool = False            # IM pinch + middle–ring tight (b9 on right hand)
+
+
+@dataclass
+class _DebouncedSignal:
+    """Frame-count hysteresis so brief threshold flicker does not toggle output."""
+    stable: bool = False
+    on_streak: int = 0
+    off_streak: int = 0
+
 
 # ── Tracker ───────────────────────────────────────────────────────────────────
 
@@ -77,9 +120,16 @@ class HandTracker:
         self._detector = mp_vision.HandLandmarker.create_from_options(options)
         self._start_ms = time.time()
 
-    def process(self, frame_bgr: "np.ndarray") -> tuple["np.ndarray", list[HandData]]:
+        self._debounce_pinch = {
+            "Left":  {"active": _DebouncedSignal(), "triple": _DebouncedSignal()},
+            "Right": {"active": _DebouncedSignal(), "triple": _DebouncedSignal()},
+        }
+
+    def process(self, frame_bgr: Any) -> tuple[Any, list[HandData]]:
         """
         Process a BGR frame (already mirrored).
+        Left/Right are by screen position: two hands → leftmost wrist = Left;
+        one hand → Left if wrist on left half of frame, else Right.
         Returns (annotated_frame, list[HandData]).
         """
         h, w = frame_bgr.shape[:2]
@@ -90,75 +140,121 @@ class HandTracker:
         result = self._detector.detect_for_video(mp_image, timestamp_ms)
 
         hand_data_list: list[HandData] = []
+        world_list: list[Any] = list(result.hand_world_landmarks or [])
 
-        for landmarks_norm in result.hand_landmarks:
-            # Pixel coords first so we can use wrist position
+        entries: list[tuple[int, int, list, list[tuple[int, int]], Any]] = []
+        for i, landmarks_norm in enumerate(result.hand_landmarks):
             lm_pixels: list[tuple[int, int]] = [
                 (int(lm.x * w), int(lm.y * h))
                 for lm in landmarks_norm
             ]
+            wx = lm_pixels[0][0]
+            wl = (
+                world_list[i]
+                if i < len(world_list) and world_list[i] and len(world_list[i]) >= 21
+                else None
+            )
+            entries.append((wx, i, landmarks_norm, lm_pixels, wl))
 
-            # Position-based classification: after cv2.flip, wrist left of
-            # centre = user's left hand, wrist right of centre = user's right.
-            # This is more reliable than MediaPipe's anatomical classifier on
-            # a mirrored frame.
-            wrist_x = lm_pixels[0][0]
-            label   = "Left" if wrist_x < w // 2 else "Right"
-            col     = COLOUR[label]
+        entries.sort(key=lambda e: e[0])
+        labeled: list[tuple[tuple, str]] = []
+        if len(entries) == 1:
+            wx, *_rest = entries[0]
+            lbl = "Left" if wx < w // 2 else "Right"
+            labeled.append((entries[0], lbl))
+        elif len(entries) >= 2:
+            labeled.append((entries[0], "Left"))
+            labeled.append((entries[1], "Right"))
+
+        seen_labels: set[str] = set()
+
+        for (_wx, _i, landmarks_norm, lm_pixels, world_chunk), label in labeled:
+            seen_labels.add(label)
+            col = COLOUR[label]
 
             index_tip  = lm_pixels[8]
             middle_tip = lm_pixels[12]
+            ring_tip   = lm_pixels[16]
 
-            # Pinch: index tip and middle tip close together (left hand only)
-            pinch_active = (
-                label == "Left"
-                and _distance(index_tip, middle_tip) < PINCH_THRESHOLD_PX
+            if world_chunk is not None:
+                metrics = _pinch_metrics_world(world_chunk)
+            else:
+                metrics = _pinch_metrics_norm(landmarks_norm)
+
+            d_im, d_mr, thresh, pinch_ok = metrics
+            thr_triple = thresh * TRIPLE_THRESH_MULT
+
+            raw_pinch = (d_im < thresh) and pinch_ok
+            raw_triple = raw_pinch and (d_mr < thr_triple)
+
+            deb = self._debounce_pinch[label]
+            pinch_active = _debounce_signal(
+                deb["active"], raw_pinch, PINCH_ON_FRAMES, PINCH_OFF_FRAMES,
+            )
+            pinch_triple = _debounce_signal(
+                deb["triple"], raw_triple, PINCH_ON_FRAMES, PINCH_OFF_FRAMES,
             )
 
-            # Draw bone connections
             for a, b in HAND_CONNECTIONS:
                 cv2.line(frame_bgr, lm_pixels[a], lm_pixels[b],
                          col["line"], 2, cv2.LINE_AA)
 
-            # Draw all 21 landmark dots; skip 8 (and 12 when pinching) below
-            skip = {8, 12} if pinch_active else {8}
-            for i, pt in enumerate(lm_pixels):
-                if i in skip:
+            if pinch_triple:
+                skip = {8, 12, 16}
+            elif pinch_active:
+                skip = {8, 12}
+            else:
+                skip = {8}
+            for li, pt in enumerate(lm_pixels):
+                if li in skip:
                     continue
                 cv2.circle(frame_bgr, pt, LANDMARK_DOT_RADIUS,
                            col["dot"], -1, cv2.LINE_AA)
                 cv2.circle(frame_bgr, pt, LANDMARK_DOT_RADIUS,
                            (255, 255, 255), 1, cv2.LINE_AA)
 
-            if pinch_active:
-                # Both pinched tips share the same highlight colour
+            if pinch_triple:
+                for pt in (index_tip, middle_tip, ring_tip):
+                    cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
+                               PINCH_COLOUR, -1, cv2.LINE_AA)
+                    cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
+                               (255, 255, 255), 2, cv2.LINE_AA)
+            elif pinch_active:
                 for pt in (index_tip, middle_tip):
                     cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
                                PINCH_COLOUR, -1, cv2.LINE_AA)
                     cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
                                (255, 255, 255), 2, cv2.LINE_AA)
             else:
-                # Normal: overdraw index tip as the active pointer
                 cv2.circle(frame_bgr, index_tip, ACTIVE_TIP_RADIUS,
                            col["tip"], -1, cv2.LINE_AA)
                 cv2.circle(frame_bgr, index_tip, ACTIVE_TIP_RADIUS,
                            (255, 255, 255), 2, cv2.LINE_AA)
 
-            # Wrist label
             wrist = lm_pixels[0]
-            cv2.putText(
-                frame_bgr, label,
-                (wrist[0] - 20, wrist[1] + 25),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, col["dot"], 2, cv2.LINE_AA,
+            frame_bgr = _draw_text_pil(
+                frame_bgr,
+                label,
+                (wrist[0], wrist[1] + 26),
+                _FONT_WRIST,
+                col["dot"],
+                anchor="center",
             )
 
             hand_data_list.append(HandData(
                 label=label,
                 index_tip=index_tip,
                 middle_tip=middle_tip,
+                ring_tip=ring_tip,
                 landmarks=lm_pixels,
                 pinch_active=pinch_active,
+                pinch_triple=pinch_triple,
             ))
+
+        for lbl in ("Left", "Right"):
+            if lbl not in seen_labels:
+                _reset_debounced_signal(self._debounce_pinch[lbl]["active"])
+                _reset_debounced_signal(self._debounce_pinch[lbl]["triple"])
 
         return frame_bgr, hand_data_list
 
@@ -173,8 +269,78 @@ class HandTracker:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _distance(a: tuple[int, int], b: tuple[int, int]) -> float:
-    return math.hypot(a[0] - b[0], a[1] - b[1])
+def _lm_xyz_dist(a: object, b: object) -> float:
+    """3D distance between landmarks with .x .y .z (world or normalized)."""
+    return math.sqrt(
+        (a.x - b.x) ** 2 + (a.y - b.y) ** 2 + (a.z - b.z) ** 2
+    )
+
+
+def _pinch_metrics_world(world_lms: list) -> tuple[float, float, float, bool]:
+    """
+    Index–middle gap, middle–ring gap, pinch threshold, pinch_ok (guards vs fist / parallel point).
+    """
+    palm = _lm_xyz_dist(world_lms[0], world_lms[9])
+    thresh = max(WORLD_PINCH_FLOOR_M, WORLD_PINCH_PALM_FRAC * palm)
+    d_im = _lm_xyz_dist(world_lms[8], world_lms[12])
+    d_mr = _lm_xyz_dist(world_lms[12], world_lms[16])
+    idx_len = _lm_xyz_dist(world_lms[5], world_lms[8])
+    mid_len = _lm_xyz_dist(world_lms[9], world_lms[12])
+    extend_min = max(
+        WORLD_INDEX_EXTEND_FLOOR_M,
+        WORLD_INDEX_EXTEND_PALM_FRAC * palm,
+    )
+    mid_max = max(WORLD_MIDDLE_MAX_LEN_M, WORLD_MIDDLE_MAX_LEN_FRAC * palm)
+    tight = d_im < thresh * PINCH_TIGHT_BYPASS_FRAC
+    index_ok = (idx_len >= extend_min) or tight
+    middle_ok = (mid_len <= mid_max) or tight
+    pinch_ok = index_ok and middle_ok
+    return d_im, d_mr, thresh, pinch_ok
+
+
+def _pinch_metrics_norm(norm_lms: list) -> tuple[float, float, float, bool]:
+    palm = _lm_xyz_dist(norm_lms[0], norm_lms[9])
+    thresh = max(NORM_PINCH_FLOOR, NORM_PINCH_PALM_FRAC * palm)
+    d_im = _lm_xyz_dist(norm_lms[8], norm_lms[12])
+    d_mr = _lm_xyz_dist(norm_lms[12], norm_lms[16])
+    idx_len = _lm_xyz_dist(norm_lms[5], norm_lms[8])
+    mid_len = _lm_xyz_dist(norm_lms[9], norm_lms[12])
+    extend_min = max(
+        NORM_INDEX_EXTEND_FLOOR,
+        NORM_INDEX_EXTEND_PALM_FRAC * palm,
+    )
+    mid_max = max(NORM_MIDDLE_MAX_LEN, NORM_MIDDLE_MAX_LEN_FRAC * palm)
+    tight = d_im < thresh * PINCH_TIGHT_BYPASS_FRAC
+    index_ok = (idx_len >= extend_min) or tight
+    middle_ok = (mid_len <= mid_max) or tight
+    pinch_ok = index_ok and middle_ok
+    return d_im, d_mr, thresh, pinch_ok
+
+
+def _debounce_signal(state: _DebouncedSignal, raw: bool, on_n: int, off_n: int) -> bool:
+    """Return hysteresis-stable boolean from noisy raw input."""
+    if raw:
+        state.off_streak = 0
+        if not state.stable:
+            state.on_streak += 1
+            if state.on_streak >= on_n:
+                state.stable = True
+                state.on_streak = 0
+    else:
+        state.on_streak = 0
+        if state.stable:
+            state.off_streak += 1
+            if state.off_streak >= off_n:
+                state.stable = False
+                state.off_streak = 0
+    return state.stable
+
+
+def _reset_debounced_signal(state: _DebouncedSignal) -> None:
+    state.stable = False
+    state.on_streak = 0
+    state.off_streak = 0
+
 
 # ── Standalone test ───────────────────────────────────────────────────────────
 
@@ -190,12 +356,18 @@ if __name__ == "__main__":
         frame = cv2.flip(frame, 1)
         frame, hands = tracker.process(frame)
 
-        y = 30
+        y = 28
         for hd in hands:
-            cv2.putText(frame,
-                f"{hd.label}: index={hd.index_tip}  pinch={'YES' if hd.pinch_active else 'no'}",
-                (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
-            y += 22
+            line = f"{hd.label}: pinch={'Y' if hd.pinch_active else 'n'}  b9={'Y' if hd.pinch_triple else 'n'}"
+            frame = _draw_text_pil(
+                frame,
+                line,
+                (10, y),
+                _FONT_DEBUG,
+                (200, 200, 200),
+                anchor="tl",
+            )
+            y += 24
 
         cv2.imshow("Conductor — Chunk 1: Hand Tracker", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):

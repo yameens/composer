@@ -49,8 +49,10 @@ BEAT_BPM       = 130
 DRUM_CHANNEL   = 9    # Logic ch 10 — Drum Kit Designer / UltraBeat
 SYNTH_CHANNEL  = 0    # FluidSynth channel for chords (drums stay on ch 9)
 SYNTH_PROGRAMS = [0, 48, 89]   # Piano, String Ensemble 1, Pad 2 Warm
-KICK_NOTE      = 36   # Bass Drum 1
-KICK_VELOCITY  = 110
+KICK_NOTE      = 36   # Bass Drum 1 (GM)
+KICK_SUB_NOTE  = 35   # Acoustic Bass Drum — layered for low-end body
+KICK_VELOCITY  = 122  # primary kick velocity (0–127)
+KICK_SUB_VELOCITY = 78   # softer layer under main kick
 KICK_RELEASE_S = 0.05
 KICK_STEPS     = frozenset({0, 4, 8, 11, 14})
 _STEP_S        = 60.0 / (BEAT_BPM * 4)   # ≈ 0.1154 s per 16th note
@@ -73,9 +75,50 @@ CHORD_INTERVALS: dict[str, list[int]] = {
     "sus4": [0, 5, 7],
 }
 
-def chord_notes(root: str, chord_type: str) -> list[int]:
+# 9th / b9 extension only available on these chord types
+SEVENTH_TYPES = {"Maj7", "min7", "7"}
+
+def voiced_chord_notes(
+    root: str,
+    chord_type: str,
+    add_nine: bool = False,
+    add_flat_nine: bool = False,
+) -> list[int]:
+    """
+    Build the full voiced chord (bottom-up):
+      [bass, pad, root, ...optional 9/b9..., 3rd, 5th, 7th]
+
+    bass = root - 24  (two octaves below)
+    pad  = bass + chord's fifth interval  (consonant fifth above the bass)
+
+    9th / b9 are only inserted for SEVENTH_TYPES chords.
+    b9 is only available on dominant "7" (the G7 easter egg).
+    """
     base = ROOT_MIDI[root]
-    return [base + i for i in CHORD_INTERVALS[chord_type]]
+    iv   = CHORD_INTERVALS[chord_type]
+    bass = base - 24
+    pad  = bass + iv[2]      # fifth above bass (uses b5 for half-dim automatically)
+
+    extra: int | None = None
+    if chord_type in SEVENTH_TYPES:
+        if add_flat_nine and chord_type == "7":
+            extra = base + 1   # b9 = root + minor 2nd
+        elif add_nine:
+            extra = base + 2   # 9  = root + major 2nd
+
+    if extra is not None:
+        # insert 9 between root and 3rd: [root, 9, 3rd, 5th, 7th]
+        top = [base, extra] + [base + i for i in iv[1:]]
+    else:
+        top = [base + i for i in iv]
+
+    return [bass, pad] + top
+
+
+def chord_notes(root: str, chord_type: str) -> list[int]:
+    """Backward-compatible thin wrapper around voiced_chord_notes."""
+    return voiced_chord_notes(root, chord_type)
+
 
 def _layer_notes(layer: dict, notes: list[int]) -> list[int]:
     if layer.get("notes") == "root_low":
@@ -95,7 +138,7 @@ class ChordEngine:
             **{L["ch"]: [] for L in LAYERS},
         }
         self._layer_on: list[bool] = [False] * len(LAYERS)
-        self._current_chord: Optional[tuple[str, str]] = None
+        self._current_chord: Optional[tuple] = None
 
         self._beat_running = False
         self._beat_thread: Optional[threading.Thread] = None
@@ -105,6 +148,9 @@ class ChordEngine:
         self._use_synth    = False
         self._synth_preset = 0
         self._synth_active: list[int] = []
+
+        self._voice_lead = False
+        self._prev_top: Optional[int] = None
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -191,8 +237,9 @@ class ChordEngine:
                         )
                     # Re-trigger chord with the new sound
                     if self._current_chord is not None:
-                        root, ctype = self._current_chord
-                        notes = chord_notes(root, ctype)
+                        root, ctype, a9, ab9, _vl = self._current_chord
+                        full  = voiced_chord_notes(root, ctype, a9, ab9)
+                        notes = [full[0]] + self._lead_voicing(full[1:]) if self._voice_lead else full
                         for n in self._synth_active:
                             if self._beat_fs:
                                 self._beat_fs.noteoff(SYNTH_CHANNEL, n)
@@ -218,8 +265,9 @@ class ChordEngine:
                 self._active[ch] = []
                 # No layers remain — restore main channel
                 if not any_layer_on and self._current_chord is not None:
-                    root, ctype = self._current_chord
-                    notes = chord_notes(root, ctype)
+                    root, ctype, a9, ab9, _vl = self._current_chord
+                    full  = voiced_chord_notes(root, ctype, a9, ab9)
+                    notes = [full[0]] + self._lead_voicing(full[1:]) if self._voice_lead else full
                     for n in notes:
                         self._noteon(MAIN_CHANNEL, n, VELOCITY)
                     self._active[MAIN_CHANNEL] = notes
@@ -230,8 +278,9 @@ class ChordEngine:
                     self._active[MAIN_CHANNEL] = []
                 # Start playing on this layer immediately
                 if self._current_chord is not None:
-                    root, ctype = self._current_chord
-                    notes = chord_notes(root, ctype)
+                    root, ctype, a9, ab9, _vl = self._current_chord
+                    full  = voiced_chord_notes(root, ctype, a9, ab9)
+                    notes = [full[0]] + self._lead_voicing(full[1:]) if self._voice_lead else full
                     ln = _layer_notes(LAYERS[idx], notes)
                     for n in ln:
                         self._noteon(ch, n, VELOCITY)
@@ -256,6 +305,7 @@ class ChordEngine:
             t0 = time.perf_counter()
             if step in KICK_STEPS and self._beat_fs is not None:
                 self._beat_fs.noteon(DRUM_CHANNEL, KICK_NOTE, KICK_VELOCITY)
+                self._beat_fs.noteon(DRUM_CHANNEL, KICK_SUB_NOTE, KICK_SUB_VELOCITY)
                 threading.Timer(KICK_RELEASE_S, self._release_kick).start()
                 kick_count += 1
                 if kick_count <= 3:   # confirm first 3 kicks in terminal
@@ -267,21 +317,88 @@ class ChordEngine:
     def _release_kick(self) -> None:
         if self._beat_fs is not None:
             self._beat_fs.noteoff(DRUM_CHANNEL, KICK_NOTE)
+            self._beat_fs.noteoff(DRUM_CHANNEL, KICK_SUB_NOTE)
+
+    # ── Voice leading ──────────────────────────────────────────────────────
+
+    def set_voice_lead(self, on: bool) -> None:
+        """Enable or disable strict-closest voice-leading mode."""
+        with self._lock:
+            self._voice_lead = on
+            self._prev_top   = None
+            self._current_chord = None   # force retrigger on next chord event
+
+    def _lead_voicing(self, chord_top: list[int]) -> list[int]:
+        """
+        Given the top-register notes of a chord (no bass/pad), return a
+        rotation + octave-shift whose highest note is strictly closest in
+        semitones to the previous chord's highest note.
+
+        On the very first call (no previous chord), the notes are returned
+        as-is and the top note is remembered for the next call.
+        """
+        if self._prev_top is None:
+            self._prev_top = chord_top[-1]
+            return chord_top
+
+        target = self._prev_top
+        n = len(chord_top)
+        best      = chord_top
+        best_dist = abs(chord_top[-1] - target)
+
+        # chord_top is already sorted ascending (intervals are non-negative).
+        # Each inversion is built by taking a rotation of the pitch-classes and
+        # stacking them in strictly ascending order, then globally shifting by
+        # an octave until the top note is as close as possible to target.
+        pitch_classes = [p % 12 for p in chord_top]
+        for k in range(n):
+            # Build an ascending stack starting from pitch class k
+            rot_pc = pitch_classes[k:] + pitch_classes[:k]
+            notes: list[int] = []
+            base_oct = chord_top[k] - pitch_classes[k]   # octave offset for first note
+            current = base_oct + rot_pc[0]
+            notes.append(current)
+            for pc in rot_pc[1:]:
+                candidate = base_oct + pc
+                while candidate <= notes[-1]:
+                    candidate += 12
+                notes.append(candidate)
+            # Try shifting the whole voicing by ±1 octave to find closest top
+            for shift in (-12, 0, 12):
+                cand = [x + shift for x in notes]
+                d = abs(cand[-1] - target)
+                if d < best_dist:
+                    best_dist = d
+                    best      = cand
+
+        self._prev_top = best[-1]
+        return best
 
     # ── Playback ───────────────────────────────────────────────────────────
 
-    def play(self, root: str, chord_type: str) -> None:
+    def play(
+        self,
+        root: str,
+        chord_type: str,
+        *,
+        add_nine: bool = False,
+        add_flat_nine: bool = False,
+    ) -> None:
         if self._port is None and not self._use_synth:
             raise RuntimeError("Call start() before play().")
 
-        new_chord = (root, chord_type)
-        if new_chord == self._current_chord:
-            return
-
-        new_notes = chord_notes(root, chord_type)
-        new_set   = set(new_notes)
-
         with self._lock:
+            new_chord = (root, chord_type, add_nine, add_flat_nine, self._voice_lead)
+            if new_chord == self._current_chord:
+                return
+
+            full = voiced_chord_notes(root, chord_type, add_nine, add_flat_nine)
+            if self._voice_lead:
+                # Keep the very-low root fixed; invert everything above (pad + chord)
+                new_notes = [full[0]] + self._lead_voicing(full[1:])
+            else:
+                new_notes = full
+            new_set   = set(new_notes)
             self._current_chord = new_chord
 
             # ── Synth path ────────────────────────────────────────────────────
@@ -338,6 +455,7 @@ class ChordEngine:
     def all_notes_off(self) -> None:
         with self._lock:
             self._kill_all()
+            self._panic_all_channels()
             for ch in self._active:
                 self._active[ch] = []
             for n in self._synth_active:
@@ -362,11 +480,11 @@ class ChordEngine:
 
     def _kill_channel(self, ch: int) -> None:
         if self._port:
-            # Individual note-offs for each tracked note (reliable with all DAWs)
             for n in self._active.get(ch, []):
                 self._noteoff(ch, n)
-            # CC 123 as backup
+            self._port.send(mido.Message("control_change", channel=ch, control=64,  value=0))
             self._port.send(mido.Message("control_change", channel=ch, control=123, value=0))
+            self._port.send(mido.Message("control_change", channel=ch, control=120, value=0))
 
     def _kill_channel_notes(self, ch: int, notes: list[int]) -> None:
         for n in notes:
@@ -375,13 +493,21 @@ class ChordEngine:
             self._port.send(mido.Message("control_change", channel=ch, control=64, value=0))
             self._port.send(mido.Message("control_change", channel=ch, control=123, value=0))
 
+    def _panic_all_channels(self) -> None:
+        if not self._port:
+            return
+        for ch in range(16):
+            self._port.send(mido.Message("control_change", channel=ch, control=64,  value=0))
+            self._port.send(mido.Message("control_change", channel=ch, control=123, value=0))
+            self._port.send(mido.Message("control_change", channel=ch, control=120, value=0))
+
     def _synth_noteoff_notes(self, notes: list[int]) -> None:
         if self._beat_fs:
             for n in notes:
                 self._beat_fs.noteoff(SYNTH_CHANNEL, n)
 
     @property
-    def current_chord(self) -> Optional[tuple[str, str]]:
+    def current_chord(self) -> Optional[tuple]:
         return self._current_chord
 
 # ── Standalone test ───────────────────────────────────────────────────────────

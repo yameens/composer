@@ -14,6 +14,8 @@ import math
 import cv2
 import numpy as np
 
+from ui_circles import RADIUS, _draw_text_pil, _FONT_MODE
+
 # ── Shared geometry ───────────────────────────────────────────────────────────
 
 BTN_RADIUS  = 28
@@ -33,8 +35,8 @@ def _btn_centres(w: int, h: int) -> list[tuple[int, int]]:
 
 # Colours BGR
 _C_OFF_RING      = (255, 255, 255)
-_C_ON_FILL       = ( 40,  40, 220)   # red
-_C_ON_HOVER_FILL = ( 20,  80, 255)   # orange-red
+_C_ON_FILL       = (  0,   0,   0)   # black
+_C_ON_HOVER_FILL = ( 40,  40,  40)   # dark gray (slight lift on hover)
 
 def get_hovered_button(tip: tuple[int, int], w: int, h: int) -> int:
     """Return index 0-2 of the instrument button under the fingertip, or -1."""
@@ -76,10 +78,10 @@ def draw_buttons(
 _BEAT_CX = BTN_MARGIN
 _BEAT_CY = BTN_MARGIN
 
-# Sky blue: RGB(135,206,235) → BGR(235,206,135)
-_C_BEAT_ON     = (235, 206, 135)
-_C_BEAT_ON_HOV = (195, 170, 105)
-_C_BEAT_RING   = (235, 206, 135)
+# Gold: BGR for RGB #FFD700
+_C_BEAT_ON     = (  0, 215, 255)
+_C_BEAT_ON_HOV = (  0, 175, 210)
+_C_BEAT_RING   = (  0, 215, 255)
 
 def get_hovered_beat_button(tip: tuple[int, int], w: int, h: int) -> bool:
     """Return True if the fingertip is inside the jersey beat button."""
@@ -114,12 +116,12 @@ def draw_beat_button(
 # L = Logic/IAC mode (orange)   S = Synth/FluidSynth mode (green)
 
 MODE_BTN_RADIUS   = 22
-MODE_BTN_Y_OFFSET = 260   # circle RADIUS=200 + 60 px padding
+MODE_BTN_Y_OFFSET = RADIUS + 60   # below left circle bottom edge + padding
 
-_C_MODE_LOGIC      = ( 40, 160, 235)   # BGR orange
-_C_MODE_LOGIC_HOV  = ( 20, 100, 200)
-_C_MODE_SYNTH      = (100, 220, 100)   # BGR green
-_C_MODE_SYNTH_HOV  = ( 60, 160,  60)
+_C_MODE_LOGIC      = (  0, 215, 255)   # gold — IAC mode
+_C_MODE_LOGIC_HOV  = (  0, 175, 210)
+_C_MODE_SYNTH      = ( 20, 200, 245)   # slightly lighter gold — SYN mode
+_C_MODE_SYNTH_HOV  = (  0, 160, 200)
 
 def get_hovered_mode_button(tip: tuple[int, int], w: int, h: int) -> bool:
     """Return True if the fingertip is inside the mode toggle button."""
@@ -147,13 +149,9 @@ def draw_mode_button(
 
     _filled_circle(overlay, cx, cy, fill, alpha=0.85, radius=MODE_BTN_RADIUS)
     cv2.circle(overlay, (cx, cy), MODE_BTN_RADIUS, (255, 255, 255), 2, cv2.LINE_AA)
-    cv2.putText(
-        overlay, label,
-        (cx - 14, cy + 5),
-        cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1, cv2.LINE_AA,
-    )
 
     cv2.addWeighted(overlay, 1.0, frame, 0.0, 0, frame)
+    frame = _draw_text_pil(frame, label, (cx, cy), _FONT_MODE, (255, 255, 255))
     return frame
 
 # ── Helper ────────────────────────────────────────────────────────────────────

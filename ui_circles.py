@@ -7,6 +7,7 @@ Press Q to quit.
 
 import math
 import os
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -16,50 +17,122 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ── Layout constants ──────────────────────────────────────────────────────────
 
-RADIUS       = 200       # outer radius
-INNER_RADIUS = 30        # hole radius
+RADIUS       = 190       # outer radius — sized to clear top-right / top-left UI at 1280px
+INNER_RADIUS = 60        # hole radius — wider dead-zone for easier sweeps between segments
 NUM_SEGMENTS = 7
 SEG_ANGLE    = 360 / NUM_SEGMENTS   # ≈ 51.43°
 START_OFFSET = -90       # top of circle = segment 0
 
-# Translucency — near-transparent fills, just lines visible
-ALPHA_BASE    = 0.0    # invisible fill; only divider lines show
-ALPHA_HOVER   = 0.30   # subtle fill on hovered segment
-ALPHA_CONFIRM = 0.45   # slightly stronger on active/playing segment
+# Translucency
+ALPHA_BASE    = 0.42   # translucent black bg on all segments — makes labels readable
+ALPHA_HOVER   = 0.60   # gold fill on hovered segment
+ALPHA_CONFIRM = 0.75   # brighter gold on active/playing segment
 
 # Segment label sets
 ROOT_LABELS = ["A", "D", "G", "C", "F", "B", "E"]   # circle of fifths order
 TYPE_LABELS = ["Maj", "Maj7", "7", "dim", "Min", "min7", "sus4"]
 
-# Colour palette (BGR)
+# Gold: BGR for RGB #FFD700
+_GOLD         = (  0, 215, 255)
+_GOLD_HOVER   = (  0, 180, 215)
+_GOLD_CONFIRM = ( 20, 230, 255)
+
+# Colour palette (BGR) — black & gold theme
 PALETTE = {
     "left":  {
-        "base":    ( 40, 140, 255),
-        "hover":   ( 80, 190, 255),
-        "confirm": (160, 230, 255),
+        "base":    (  0,   0,   0),   # black — translucent bg behind labels
+        "hover":   _GOLD_HOVER,
+        "confirm": _GOLD_CONFIRM,
         "border":  (255, 255, 255),
         "text":    (255, 255, 255),
     },
     "right": {
-        "base":    (200,  60, 255),
-        "hover":   (230, 120, 255),
-        "confirm": (255, 200, 255),
+        "base":    (  0,   0,   0),
+        "hover":   _GOLD_HOVER,
+        "confirm": _GOLD_CONFIRM,
         "border":  (255, 255, 255),
         "text":    (255, 255, 255),
     },
 }
 
-# Font
-_FONT_PATH = Path(__file__).parent / "assets" / "FiraMono-Regular.ttf"
+def _resolve_accent_font_path() -> Optional[Path]:
+    """Jacquard 24 — bottom wordmark + keyboard hints only."""
+    assets_dir = Path(__file__).parent / "assets"
+    for name in ("Jacquard24-Regular.ttf", "Jacquard-24-Regular.ttf"):
+        p = assets_dir / name
+        if p.exists():
+            return p
+    return None
 
-def _load_font(size: int) -> ImageFont.FreeTypeFont:
-    try:
-        return ImageFont.truetype(str(_FONT_PATH), size)
-    except Exception:
-        return ImageFont.load_default()
 
-_FONT_LG = _load_font(28)   # root labels (single letters)
-_FONT_SM = _load_font(20)   # type labels (short strings)
+def _resolve_body_font_path() -> Optional[Path]:
+    """Georgia for main UI (circles, top HUD, buttons); then Calibri / Fira."""
+    assets_dir = Path(__file__).parent / "assets"
+    candidates: list[Path] = [
+        assets_dir / "Georgia.ttf",
+        assets_dir / "georgia.ttf",
+    ]
+    if sys.platform == "darwin":
+        candidates.extend([
+            Path("/System/Library/Fonts/Supplemental/Georgia.ttf"),
+            Path("/Library/Fonts/Georgia.ttf"),
+            Path("/Library/Fonts/Microsoft/Georgia.ttf"),
+        ])
+    elif sys.platform == "win32":
+        wind = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        candidates.extend([wind / "georgia.ttf", wind / "Georgia.ttf"])
+    candidates.extend([
+        assets_dir / "calibri.ttf",
+        assets_dir / "Calibri.ttf",
+    ])
+    if sys.platform == "darwin":
+        candidates.append(Path("/Library/Fonts/Microsoft/Calibri.ttf"))
+    elif sys.platform == "win32":
+        candidates.append(Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / "calibri.ttf")
+    candidates.append(assets_dir / "FiraMono-Regular.ttf")
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+_FONT_PATH_ACCENT = _resolve_accent_font_path()
+_FONT_PATH_BODY = _resolve_body_font_path()
+
+
+def _load_body_font(size: int) -> ImageFont.FreeTypeFont:
+    if _FONT_PATH_BODY:
+        try:
+            return ImageFont.truetype(str(_FONT_PATH_BODY), size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
+def _load_accent_font(size: int) -> ImageFont.FreeTypeFont:
+    if _FONT_PATH_ACCENT:
+        try:
+            return ImageFont.truetype(str(_FONT_PATH_ACCENT), size)
+        except Exception:
+            pass
+    return _load_body_font(size)
+
+
+def app_font(size: int) -> ImageFont.FreeTypeFont:
+    """Body / UI typeface (Georgia when available)."""
+    return _load_body_font(size)
+
+
+_FONT_LG    = _load_body_font(28)   # root letters, HUD chord readout
+_FONT_SM    = _load_body_font(20)   # type labels, circle titles
+_FONT_MODE  = _load_body_font(15)   # small buttons
+_FONT_XS    = _load_body_font(14)   # reserved / small UI
+_FONT_BRAND = _load_accent_font(22)   # bottom-left wordmark (Jacquard)
+_FONT_HUD_KEYS = _load_accent_font(24)   # Q/T/V/S row (Jacquard)
+
+# Uppercase wordmark fallback (Jacquard); change if you regenerate PNG.
+BRAND_TEXT           = "COMPOSER"
+BRAND_LETTER_SPACING = 7
 
 # ── Core geometry helpers ─────────────────────────────────────────────────────
 
@@ -96,16 +169,122 @@ def _draw_text_pil(
     pos: tuple[int, int],
     font: ImageFont.FreeTypeFont,
     colour_bgr: tuple[int, int, int],
+    bold: bool = False,
+    underline: bool = False,
+    anchor: str = "center",
+    letter_spacing: int = 0,
 ) -> np.ndarray:
-    """Render anti-aliased text onto an OpenCV frame via PIL (centred on pos)."""
+    """Render anti-aliased text onto an OpenCV frame via PIL.
+
+    ``anchor``: ``center`` — ``pos`` is the centre (default); ``frame_bl`` —
+    ``pos`` is ``(margin_left, margin_bottom)`` insets from the frame bottom-left;
+    ``tl`` — ``pos`` is the top-left corner of the tight text bbox.
+
+    When ``bold=True``, stroke matching the fill colour thickens the glyphs.
+    When ``underline=True``, a 2-px line is drawn just below the glyphs.
+    ``letter_spacing``: extra pixels between glyphs (0 = default kerning only).
+    """
     pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     draw    = ImageDraw.Draw(pil_img)
-    bbox    = draw.textbbox((0, 0), text, font=font)
-    tw, th  = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    xy      = (pos[0] - tw // 2, pos[1] - th // 2)
+    stroke  = 1 if bold else 0
     r, g, b = colour_bgr[2], colour_bgr[1], colour_bgr[0]
-    draw.text(xy, text, font=font, fill=(r, g, b, 255))
+    fh      = frame.shape[0]
+
+    if letter_spacing <= 0:
+        bbox   = draw.textbbox((0, 0), text, font=font, stroke_width=stroke)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        if anchor == "frame_bl":
+            xy = (pos[0], fh - pos[1] - th)
+        elif anchor == "tl":
+            xy = (pos[0] - bbox[0], pos[1] - bbox[1])
+        else:
+            xy = (pos[0] - tw // 2, pos[1] - th // 2)
+        draw.text(
+            xy, text, font=font, fill=(r, g, b, 255),
+            stroke_width=stroke, stroke_fill=(r, g, b, 255),
+        )
+    else:
+        th = 0
+        advances: list[int] = []
+        for ch in text:
+            bb = draw.textbbox((0, 0), ch, font=font, stroke_width=stroke)
+            advances.append(bb[2] - bb[0])
+            th = max(th, bb[3] - bb[1])
+        tw = sum(advances) + letter_spacing * max(0, len(text) - 1)
+        if anchor == "frame_bl":
+            x0, y0 = pos[0], fh - pos[1] - th
+        elif anchor == "tl":
+            bb0 = draw.textbbox((0, 0), text[0], font=font, stroke_width=stroke)
+            x0 = pos[0] - bb0[0]
+            y0 = pos[1] - bb0[1]
+        else:
+            x0, y0 = pos[0] - tw // 2, pos[1] - th // 2
+        x_cur = x0
+        for i, ch in enumerate(text):
+            draw.text(
+                (x_cur, y0), ch, font=font, fill=(r, g, b, 255),
+                stroke_width=stroke, stroke_fill=(r, g, b, 255),
+            )
+            x_cur += advances[i] + (letter_spacing if i < len(text) - 1 else 0)
+        xy = (x0, y0)
+
+    if underline:
+        line_y = xy[1] + th + 2
+        draw.line([(xy[0], line_y), (xy[0] + tw, line_y)],
+                  fill=(r, g, b, 255), width=2)
     return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+
+
+_BRAND_PNG = Path(__file__).parent / "assets" / "conductor_brand.png"
+
+
+def draw_brand_wordmark(
+    frame: np.ndarray,
+    margin_x: int = 14,
+    margin_bottom: int = 14,
+) -> np.ndarray:
+    """
+    Bottom-left titling: use assets/conductor_brand.png if present (e.g. TeX export),
+    else letter-spaced vector text with BRAND_TEXT / _FONT_BRAND (Jacquard accent).
+    """
+    if _BRAND_PNG.exists():
+        badge = cv2.imread(str(_BRAND_PNG), cv2.IMREAD_UNCHANGED)
+        if badge is None:
+            return _draw_text_pil(
+                frame,
+                BRAND_TEXT,
+                (margin_x, margin_bottom),
+                _FONT_BRAND,
+                (0, 0, 0),
+                bold=False,
+                anchor="frame_bl",
+                letter_spacing=BRAND_LETTER_SPACING,
+            )
+        fh, fw = frame.shape[:2]
+        bh, bw = badge.shape[:2]
+        y1 = fh - margin_bottom - bh
+        x1 = margin_x
+        if y1 >= 0 and x1 + bw <= fw and x1 >= 0:
+            frame = frame.copy()
+            roi = frame[y1 : y1 + bh, x1 : x1 + bw]
+            if badge.ndim == 3 and badge.shape[2] == 4:
+                a = badge[:, :, 3:4].astype(np.float32) / 255.0
+                bgr = badge[:, :, :3]
+                blended = (a * bgr + (1.0 - a) * roi).astype(np.uint8)
+                frame[y1 : y1 + bh, x1 : x1 + bw] = blended
+            elif badge.ndim == 3 and badge.shape[2] == 3:
+                frame[y1 : y1 + bh, x1 : x1 + bw] = badge
+            return frame
+    return _draw_text_pil(
+        frame,
+        BRAND_TEXT,
+        (margin_x, margin_bottom),
+        _FONT_BRAND,
+        (0, 0, 0),
+        bold=False,
+        anchor="frame_bl",
+        letter_spacing=BRAND_LETTER_SPACING,
+    )
 
 # ── Single circle renderer ────────────────────────────────────────────────────
 
@@ -141,7 +320,6 @@ def _draw_circle(
                 seg_overlay, (cx, cy), (RADIUS, RADIUS),
                 0, sa, ea, colour, thickness=-1, lineType=cv2.LINE_AA,
             )
-            cv2.circle(seg_overlay, (cx, cy), INNER_RADIUS, (0, 0, 0), -1, cv2.LINE_AA)
             cv2.addWeighted(seg_overlay, alpha, overlay, 1 - alpha, 0, overlay)
 
         # ── Segment divider lines ─────────────────────────────────────────
@@ -152,19 +330,23 @@ def _draw_circle(
         iy = int(cy + INNER_RADIUS * math.sin(border_rad))
         cv2.line(overlay, (ix, iy), (bx, by), palette["border"], 1, cv2.LINE_AA)
 
+    # ── Restore camera pixels inside the inner circle (true transparency)──
+    # Done before drawing the inner ring so the ring outline remains crisp.
+    inner_mask = np.zeros(overlay.shape[:2], dtype=np.uint8)
+    cv2.circle(inner_mask, (cx, cy), INNER_RADIUS - 1, 255, -1, cv2.LINE_AA)
+    overlay[inner_mask > 0] = frame[inner_mask > 0]
+
     # ── Outer and inner circle rings ──────────────────────────────────────
     cv2.circle(overlay, (cx, cy), RADIUS,       palette["border"], 2, cv2.LINE_AA)
     cv2.circle(overlay, (cx, cy), INNER_RADIUS, palette["border"], 2, cv2.LINE_AA)
 
-    # ── Bright arc highlight on hovered segment ────────────────────────
+    # ── Gold arc highlight on hovered segment ─────────────────────────
     if hover_idx != -1:
         sa, ea = _seg_angles(hover_idx)
-        # Thick bright arc on outer edge
         cv2.ellipse(overlay, (cx, cy), (RADIUS - 4, RADIUS - 4),
-                    0, sa, ea, (255, 255, 255), 5, cv2.LINE_AA)
-        # Thick arc on inner edge
+                    0, sa, ea, _GOLD, 5, cv2.LINE_AA)
         cv2.ellipse(overlay, (cx, cy), (INNER_RADIUS + 4, INNER_RADIUS + 4),
-                    0, sa, ea, (255, 255, 255), 4, cv2.LINE_AA)
+                    0, sa, ea, _GOLD, 4, cv2.LINE_AA)
 
     # ── Labels via PIL (rendered after blending so they stay crisp) ───────
     mid_r = (RADIUS + INNER_RADIUS) // 2
@@ -222,10 +404,10 @@ def draw_circles(
     )
 
     # ── Circle title + hand assignment labels ─────────────────────────────
-    frame = _draw_text_pil(frame, "ROOT",      (lcx, lcy - RADIUS - 38), _FONT_SM, PALETTE["left"]["hover"])
-    frame = _draw_text_pil(frame, "Left Hand", (lcx, lcy - RADIUS - 16), _FONT_SM, (200, 200, 200))
-    frame = _draw_text_pil(frame, "TYPE",       (rcx, rcy - RADIUS - 38), _FONT_SM, PALETTE["right"]["hover"])
-    frame = _draw_text_pil(frame, "Right Hand", (rcx, rcy - RADIUS - 16), _FONT_SM, (200, 200, 200))
+    frame = _draw_text_pil(frame, "ROOT",      (lcx, lcy - RADIUS - 38), _FONT_SM, _GOLD, bold=True)
+    frame = _draw_text_pil(frame, "Left Hand", (lcx, lcy - RADIUS - 16), _FONT_SM, (0, 0, 0))
+    frame = _draw_text_pil(frame, "TYPE",      (rcx, rcy - RADIUS - 38), _FONT_SM, _GOLD, bold=True)
+    frame = _draw_text_pil(frame, "Right Hand",(rcx, rcy - RADIUS - 16), _FONT_SM, (0, 0, 0))
 
     return frame
 
