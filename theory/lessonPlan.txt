@@ -1,0 +1,53 @@
+LESSON zero
+introduction to chords.
+
+[lower case] lesson zero
+Navigate the theory pages by pressing the arrows with your hands or by keyboard. [present on top]
+
+Preface
+this is not a learning tool for proper music theory. it's a tool for discovering cool chord progressions that will carry over when you jam on an instrument. if you have no music theory experience, that's completely fine, though some of the relationships between notes and chords may not feel immediately intuitive. if you'd like to deepen your understanding of music theory, i'd highly recommend musictheory.net.
+(arrow but keep header)
+i’ll do my best to explain the intuition behind these chord progressions, but if you learn better by doing, feel free to skip straight to the progressions hand guide and try them out.
+
+Root Notes (new header)
+press “t” on the keyboard anytime to practice your newfound knowledge. don’t worry, we will save your progress (smiley face)
+
+each root note is the foundation of your chord. in western music theory, there are 12 root notes: A, A#, B, C, C#, D, D#, E, F, F#, G, and G#. each represents a different pitch, a sound produced by a specific frequency. As you move from A to G, the pitch increases. after G, you cycle back to A, but in a higher octave: the same note, just pitched up.
+(arrow but keey header)
+you may notice that the “roots” circle only shows 7 notes. to access the sharp notes, hover and pinch with your middle and pointer finger together. give it a try now.
+
+Chord Types (new header)
+the circle on the right controls the chord type. so, what is a chord? a chord is a set of notes built on top of the root. the way the notes are built produces a different sound and type of chord. for example, if the root is c, the major chord, which has a happy sound, is c, e, and g. different chord types have distinct feelings: happy, eerie, sad, mysterious, or funky, each with its own name. with your left pointer finger hovering over c, try cycling through the chord types and listen to how each one feels.
+(arrow but keep header)
+that covers the basics. head to lesson one to start learning about chord progressions.
+
+
+
+Lesson One [all lowercase] (new header / new lesson)
+Chord Progressions & the Circle of Fifths
+Now that you know what a chord is, let's learn how to build some cool progressions. A chord progression is simply a sequence of chords. Some chords sound great together and others don't. However, there's no single "correct" progression. Different genres and cultures focus on different patterns, and that's what makes music really diverse..
+
+The Circle of Fifths (new header)
+A lot of music theory treats the circle of fifths as the gold standard. It sounds naturally pleasing to the brain because it is the perfect balance between tension and resolution. The sound waves also progress in a 3:2 ratio that the brain processes very easily. I couldn't tell you exactly why, but it works. Let's practice it in C Major.
+(arrow but keep header)
+The circle of fifths goes like this:
+C Major → F Major → B Dim → E Major → A Minor → D Minor → G Major
+(arrow but keep header)
+Each chord moves in a perfect fifth. If you look closely, each root note is actually a fourth apart from the next. C is four intervals away from F, F is four intervals away from B, and so on. It sounds like a lot, but once you play through it a few times, it will begin to feel intuitive.
+(new header)
+The Two-Five-One
+Before you try for the full circle, I want to highlight three chords: the two, five, and one. The two-five-one is a sequence pulled from the end of the circle of fifths. In C Major, that's D Minor → G Major → C Major. These three chords flow into each other beautifully and form the strong backbone of jazz. Start here, get comfortable, then work your way through the rest of the circle.
+The circle of fifths can be played in any key and in many different ways. Keep going to continue learning.
+
+arrow
+
+LESSON two
+chord extensions
+will be updated soon "smiley face from keyboard"
+
+arrow
+
+LESSON three
+a two, a five, and a one
+will be updated soon "smiley face from keyboard"
+

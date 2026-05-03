@@ -124,11 +124,12 @@ def app_font(size: int) -> ImageFont.FreeTypeFont:
 
 
 _FONT_LG    = _load_body_font(28)   # root letters, HUD chord readout
-_FONT_SM    = _load_body_font(20)   # type labels, circle titles
+_FONT_SM    = _load_body_font(20)   # segment labels inside circles (right ring)
 _FONT_MODE  = _load_body_font(15)   # small buttons
 _FONT_XS    = _load_body_font(14)   # reserved / small UI
-_FONT_BRAND = _load_accent_font(22)   # bottom-left wordmark (Jacquard)
-_FONT_HUD_KEYS = _load_accent_font(24)   # Q/T/V/S row (Jacquard)
+_FONT_BRAND = _load_accent_font(30)   # bottom-left wordmark (Jacquard)
+_FONT_HUD_KEYS = _load_accent_font(24)   # footer Q/T/V/S row (Jacquard)
+_FONT_CIRCLE_HEADINGS = _load_accent_font(32)   # “root” / “type” above circles
 
 # Uppercase wordmark fallback (Jacquard); change if you regenerate PNG.
 BRAND_TEXT           = "COMPOSER"
@@ -173,6 +174,7 @@ def _draw_text_pil(
     underline: bool = False,
     anchor: str = "center",
     letter_spacing: int = 0,
+    underline_gap: int = 2,
 ) -> np.ndarray:
     """Render anti-aliased text onto an OpenCV frame via PIL.
 
@@ -229,7 +231,7 @@ def _draw_text_pil(
         xy = (x0, y0)
 
     if underline:
-        line_y = xy[1] + th + 2
+        line_y = xy[1] + th + underline_gap
         draw.line([(xy[0], line_y), (xy[0] + tw, line_y)],
                   fill=(r, g, b, 255), width=2)
     return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
@@ -242,11 +244,23 @@ def draw_brand_wordmark(
     frame: np.ndarray,
     margin_x: int = 14,
     margin_bottom: int = 14,
+    strip_h: int = 0,
 ) -> np.ndarray:
     """
     Bottom-left titling: use assets/conductor_brand.png if present (e.g. TeX export),
     else letter-spaced vector text with BRAND_TEXT / _FONT_BRAND (Jacquard accent).
+    When strip_h > 0, the text is vertically centred inside that strip instead of
+    using margin_bottom as a bottom inset.
     """
+    fh = frame.shape[0]
+    if strip_h > 0:
+        # compute margin_bottom so text centre lands at strip centre
+        _dummy_img = Image.new("RGB", (1, 1))
+        _dummy_draw = ImageDraw.Draw(_dummy_img)
+        _bbox = _dummy_draw.textbbox((0, 0), BRAND_TEXT, font=_FONT_BRAND, stroke_width=0)
+        _th = _bbox[3] - _bbox[1]
+        margin_bottom = strip_h // 2 - _th // 2
+        margin_bottom = max(margin_bottom, 4)
     if _BRAND_PNG.exists():
         badge = cv2.imread(str(_BRAND_PNG), cv2.IMREAD_UNCHANGED)
         if badge is None:
@@ -255,12 +269,12 @@ def draw_brand_wordmark(
                 BRAND_TEXT,
                 (margin_x, margin_bottom),
                 _FONT_BRAND,
-                (0, 0, 0),
+                (255, 255, 255),
                 bold=False,
                 anchor="frame_bl",
                 letter_spacing=BRAND_LETTER_SPACING,
             )
-        fh, fw = frame.shape[:2]
+        fw = frame.shape[1]
         bh, bw = badge.shape[:2]
         y1 = fh - margin_bottom - bh
         x1 = margin_x
@@ -280,7 +294,7 @@ def draw_brand_wordmark(
         BRAND_TEXT,
         (margin_x, margin_bottom),
         _FONT_BRAND,
-        (0, 0, 0),
+        (255, 255, 255),
         bold=False,
         anchor="frame_bl",
         letter_spacing=BRAND_LETTER_SPACING,
@@ -403,11 +417,16 @@ def draw_circles(
         right_hover_idx, right_confirm_idx, _FONT_SM,
     )
 
-    # ── Circle title + hand assignment labels ─────────────────────────────
-    frame = _draw_text_pil(frame, "ROOT",      (lcx, lcy - RADIUS - 38), _FONT_SM, _GOLD, bold=True)
-    frame = _draw_text_pil(frame, "Left Hand", (lcx, lcy - RADIUS - 16), _FONT_SM, (0, 0, 0))
-    frame = _draw_text_pil(frame, "TYPE",      (rcx, rcy - RADIUS - 38), _FONT_SM, _GOLD, bold=True)
-    frame = _draw_text_pil(frame, "Right Hand",(rcx, rcy - RADIUS - 16), _FONT_SM, (0, 0, 0))
+    # ── Circle titles (Jacquard, same family as footer key row) ─────────────
+    title_y = -RADIUS - 26
+    frame = _draw_text_pil(
+        frame, "root", (lcx, lcy + title_y), _FONT_CIRCLE_HEADINGS, _GOLD,
+        letter_spacing=3,
+    )
+    frame = _draw_text_pil(
+        frame, "type", (rcx, rcy + title_y), _FONT_CIRCLE_HEADINGS, _GOLD,
+        letter_spacing=3,
+    )
 
     return frame
 

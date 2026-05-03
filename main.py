@@ -3,6 +3,10 @@ Conductor — main entry point.
 Run: python main.py  |  Press Q or ESC to quit.
 """
 
+import os
+import platform
+import re
+import subprocess
 import sys
 
 import cv2
@@ -25,12 +29,15 @@ from ui_circles   import (
 from ui_buttons   import (draw_buttons, get_hovered_button,
                            draw_beat_button, get_hovered_beat_button,
                            draw_mode_button, get_hovered_mode_button)
+from ui_theory    import (TheoryState, draw_theory_overlay, update_dwell, navigate,
+                           draw_practice_box, PRACTICE_SLIDE)
 from chord_engine  import ChordEngine
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 WINDOW_NAME        = "Conductor"
-CAM_INDEX          = 1
+# Fallback when auto-pick fails (Linux / Windows). On macOS we prefer built-in FaceTime over iPhone.
+CAM_INDEX          = 0
 TARGET_W, TARGET_H = 1280, 720
 SILENCE_FRAMES     = 3      # frames both segments invalid before auto-silence
 
@@ -42,7 +49,65 @@ FLAT_MAP = {"A": "Ab", "B": "Bb", "C": "Cb", "D": "Db",
 HUD_KEYS_MARGIN_RIGHT = 20
 # Translucent strip behind bottom wordmark + key hints
 HUD_BOTTOM_STRIP_H     = 52
-HUD_BOTTOM_STRIP_ALPHA = 0.14
+HUD_BOTTOM_STRIP_ALPHA = 0.24
+
+# Arrow-key raw codes for theory navigation (macOS / Linux / other OpenCV builds)
+_LEFT_KEYS  = frozenset({63234, 65361, 2, 81})
+_RIGHT_KEYS = frozenset({63235, 65363, 3, 83})
+
+
+def _resolve_camera_index() -> int:
+    """Pick OpenCV camera index: built-in FaceTime first, skip iPhone Continuity Camera.
+
+    Uses ffmpeg AVFoundation device listing, which reports cameras in the EXACT same
+    order as OpenCV's VideoCapture index numbering on macOS.
+    Override with env CONDUCTOR_CAM_INDEX (integer). On non-macOS returns CAM_INDEX.
+    """
+    raw = os.environ.get("CONDUCTOR_CAM_INDEX", "").strip()
+    if raw.isdigit():
+        return int(raw)
+    if platform.system() != "Darwin":
+        return CAM_INDEX
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+            capture_output=True, text=True, timeout=8, check=False,
+        )
+        # ffmpeg prints device list on stderr
+        lines = (proc.stderr or "").splitlines()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        lines = []
+
+    video_section = False
+    devices: list[tuple[int, str]] = []   # (avf_index, name)
+    for line in lines:
+        if "AVFoundation video devices" in line:
+            video_section = True
+            continue
+        if "AVFoundation audio devices" in line:
+            break
+        if not video_section:
+            continue
+        m = re.search(r"\[(\d+)\]\s+(.*)", line)
+        if m:
+            devices.append((int(m.group(1)), m.group(2).strip()))
+
+    if not devices:
+        return CAM_INDEX
+
+    # Pass 1 — explicit FaceTime / MacBook / built-in HD camera
+    for idx, name in devices:
+        low = name.lower()
+        if "iphone" in low or "continuity" in low or "capture screen" in low:
+            continue
+        if "facetime" in low or "built-in" in low or "macbook" in low or "hd camera" in low:
+            return idx
+    # Pass 2 — any non-iPhone device
+    for idx, name in devices:
+        low = name.lower()
+        if "iphone" not in low and "continuity" not in low and "capture screen" not in low:
+            return idx
+    return CAM_INDEX
 
 # ── HUD ────────────────────────────────────────────────────────────────────────
 
@@ -62,7 +127,7 @@ def _draw_hud(frame: np.ndarray, left_seg: int, right_seg: int,
     root_label = root_override if root_override else (ROOT_LABELS[left_seg] if left_seg != -1 else "—")
     type_label = TYPE_LABELS[right_seg] if right_seg != -1 else "—"
     mode_label = "SYN" if use_synth else "IAC"
-    mode_col   = (100, 220, 100) if use_synth else (40, 160, 235)
+    mode_col   = (50, 230, 255) if use_synth else (0, 215, 255)
 
     bar = frame.copy()
     cv2.rectangle(bar, (0, 0), (w, 52), (15, 15, 15), -1)
@@ -74,7 +139,7 @@ def _draw_hud(frame: np.ndarray, left_seg: int, right_seg: int,
     # Bottom tray — lightly tinted translucent band behind wordmark + key row
     y_strip = h - HUD_BOTTOM_STRIP_H
     strip_overlay = frame.copy()
-    cv2.rectangle(strip_overlay, (0, y_strip), (w, h), (22, 24, 28), thickness=-1, lineType=cv2.LINE_AA)
+    cv2.rectangle(strip_overlay, (0, y_strip), (w, h), (14, 16, 20), thickness=-1, lineType=cv2.LINE_AA)
     blended_strip = cv2.addWeighted(
         strip_overlay[y_strip:h], HUD_BOTTOM_STRIP_ALPHA,
         frame[y_strip:h], 1.0 - HUD_BOTTOM_STRIP_ALPHA, 0,
@@ -83,37 +148,43 @@ def _draw_hud(frame: np.ndarray, left_seg: int, right_seg: int,
     frame[y_strip:h] = blended_strip
 
     # Bottom HUD — right-aligned block; Jacquard; underline T / V / S when active.
-    q_pref = "Q = quit   |   "
+    # Order: T = theory | V = voice lead | S = sync | Q = quit
     t_txt  = "T = theory"
     mid1   = "   |   "
     v_txt  = "V = voice lead"
     mid2   = "   |   "
     s_txt  = "S = sync"
-    q_w = _hud_text_width(q_pref)
-    t_w = _hud_text_width(t_txt)
-    m1w = _hud_text_width(mid1)
-    v_w = _hud_text_width(v_txt)
-    m2w = _hud_text_width(mid2)
-    s_w = _hud_text_width(s_txt)
-    total_w = q_w + t_w + m1w + v_w + m2w + s_w
+    mid3   = "   |   "
+    q_suf  = "Q = quit"
+    t_w  = _hud_text_width(t_txt)
+    m1w  = _hud_text_width(mid1)
+    v_w  = _hud_text_width(v_txt)
+    m2w  = _hud_text_width(mid2)
+    s_w  = _hud_text_width(s_txt)
+    m3w  = _hud_text_width(mid3)
+    q_w  = _hud_text_width(q_suf)
+    total_w = t_w + m1w + v_w + m2w + s_w + m3w + q_w
     left_x = w - HUD_KEYS_MARGIN_RIGHT - total_w
-    y = h - 18
+    y = h - HUD_BOTTOM_STRIP_H // 2   # vertically centred in the footer strip
     cx = left_x
-    frame = _draw_text_pil(frame, q_pref, (cx + q_w // 2, y), _FONT_HUD_KEYS, (0, 0, 0))
-    cx += q_w
-    frame = _draw_text_pil(frame, t_txt, (cx + t_w // 2, y), _FONT_HUD_KEYS, (0, 0, 0),
+    _footer_text = (255, 255, 255)
+    frame = _draw_text_pil(frame, t_txt, (cx + t_w // 2, y), _FONT_HUD_KEYS, _footer_text,
                            underline=theory_mode)
     cx += t_w
-    frame = _draw_text_pil(frame, mid1, (cx + m1w // 2, y), _FONT_HUD_KEYS, (0, 0, 0))
+    frame = _draw_text_pil(frame, mid1, (cx + m1w // 2, y), _FONT_HUD_KEYS, _footer_text)
     cx += m1w
-    frame = _draw_text_pil(frame, v_txt, (cx + v_w // 2, y), _FONT_HUD_KEYS, (0, 0, 0),
-                           underline=voice_lead)
+    frame = _draw_text_pil(frame, v_txt, (cx + v_w // 2, y), _FONT_HUD_KEYS, _footer_text,
+                           underline=voice_lead, underline_gap=6)
     cx += v_w
-    frame = _draw_text_pil(frame, mid2, (cx + m2w // 2, y), _FONT_HUD_KEYS, (0, 0, 0))
+    frame = _draw_text_pil(frame, mid2, (cx + m2w // 2, y), _FONT_HUD_KEYS, _footer_text)
     cx += m2w
-    frame = _draw_text_pil(frame, s_txt, (cx + s_w // 2, y), _FONT_HUD_KEYS, (0, 0, 0),
+    frame = _draw_text_pil(frame, s_txt, (cx + s_w // 2, y), _FONT_HUD_KEYS, _footer_text,
                            underline=sync_mode)
-    frame = draw_brand_wordmark(frame, margin_x=14, margin_bottom=14)
+    cx += s_w
+    frame = _draw_text_pil(frame, mid3, (cx + m3w // 2, y), _FONT_HUD_KEYS, _footer_text)
+    cx += m3w
+    frame = _draw_text_pil(frame, q_suf, (cx + q_w // 2, y), _FONT_HUD_KEYS, _footer_text)
+    frame = draw_brand_wordmark(frame, margin_x=14, strip_h=HUD_BOTTOM_STRIP_H)
     return frame
 
 # ── Main loop ──────────────────────────────────────────────────────────────────
@@ -128,7 +199,12 @@ def main() -> None:
         sys.exit(1)
     print("  MIDI ready — sending to Logic via IAC.")
 
-    cap = cv2.VideoCapture(CAM_INDEX)
+    cam_idx = _resolve_camera_index()
+    if platform.system() == "Darwin":
+        print(f"  Camera index {cam_idx} (built-in laptop cam preferred over iPhone / Continuity).")
+        print("  Tip: CONDUCTOR_CAM_INDEX=1 python main.py  to force a different device.")
+
+    cap = cv2.VideoCapture(cam_idx)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  TARGET_W)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, TARGET_H)
     if not cap.isOpened():
@@ -136,9 +212,28 @@ def main() -> None:
         engine.stop()
         sys.exit(1)
 
+    # Validate that the chosen index delivers real frames.
+    # If the first read fails, try the next index before giving up.
+    _ok, _test = cap.read()
+    if not _ok:
+        print(f"  [WARN] Camera {cam_idx} returned no frame — trying index {cam_idx + 1}…")
+        cap.release()
+        cap = cv2.VideoCapture(cam_idx + 1)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  TARGET_W)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, TARGET_H)
+        if not cap.isOpened() or not cap.read()[0]:
+            print("[ERROR] No working camera found.")
+            if platform.system() == "Darwin":
+                print("  Check: System Settings → Privacy & Security → Camera → allow Terminal/Python")
+                print("  Override: CONDUCTOR_CAM_INDEX=<n> python main.py")
+            engine.stop()
+            sys.exit(1)
+        print(f"  Using camera index {cam_idx + 1}.")
+
     tracker = HandTracker(max_hands=2)
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(WINDOW_NAME, TARGET_W, TARGET_H)
+    cv2.waitKey(1)   # prime the window event loop before the main loop starts
 
     # Chord follow-finger state
     prev_left_seg   = -1
@@ -149,8 +244,10 @@ def main() -> None:
     # Voice-leading mode (toggled by V key)
     voice_lead = False
 
-    # Theory overlay mode (toggled by T key — hook real theory UI later)
-    theory_mode = False
+    # Theory overlay (T key) and live practice box (also T, on trigger slide)
+    theory_mode   = False
+    theory_state  = TheoryState()
+    practice_mode = False
 
     # Sync mode — avoid intermediate chords when root/type update one-at-a-time (S key)
     sync_mode = False
@@ -172,10 +269,17 @@ def main() -> None:
     print("Conductor running — point fingers at circles to play, hover buttons (bottom-right) to layer instruments.")
     print("Press Q or ESC to quit.\n")
 
+    _bad_frames = 0   # consecutive failed reads
     while True:
         ok, frame = cap.read()
         if not ok:
+            _bad_frames += 1
+            if _bad_frames > 120:   # ~4 s of failures at 30 fps
+                print("[ERROR] Camera stopped delivering frames. Shutting down.")
+                break
+            cv2.waitKey(1)   # keep the window event loop alive during failures
             continue
+        _bad_frames = 0
 
         frame = cv2.flip(frame, 1)
         h, w  = frame.shape[:2]
@@ -190,30 +294,31 @@ def main() -> None:
         rcx, rcy = 3 * w // 4, h // 2
 
         # ── Chord segment detection ────────────────────────────────────
-        left_seg  = angle_to_segment(lcx, lcy, *left.index_tip)  if left  else -1
-        right_seg = angle_to_segment(rcx, rcy, *right.index_tip) if right else -1
+        left_seg  = angle_to_segment(lcx, lcy, *left.index_tip)  if (left  and left.index_extended)  else -1
+        right_seg = angle_to_segment(rcx, rcy, *right.index_tip) if (right and right.index_extended) else -1
 
-        # ── Button hover + toggle ──────────────────────────────────────
+        # ── Button hover + toggle (synth mode only) ───────────────────
         finger_tips = [hd.index_tip for hd in hands]
         btn_hovered = [False, False, False]
 
-        for tip in finger_tips:
-            bi = get_hovered_button(tip, w, h)
-            if bi != -1:
-                btn_hovered[bi] = True
-                if not btn_was_in[bi]:                      # rising edge
-                    if bi == active_layer:
-                        # Re-hover active button → turn layer off
-                        engine.set_layer(active_layer, False)
-                        active_layer = -1
-                        print("  Layer OFF")
-                    else:
-                        # Switch to a different layer
-                        if active_layer != -1:
+        if synth_mode:
+            for tip in finger_tips:
+                bi = get_hovered_button(tip, w, h)
+                if bi != -1:
+                    btn_hovered[bi] = True
+                    if not btn_was_in[bi]:                      # rising edge
+                        if bi == active_layer:
+                            # Re-hover active button → turn layer off
                             engine.set_layer(active_layer, False)
-                        active_layer = bi
-                        engine.set_layer(bi, True)
-                        print(f"  Layer {bi} ON")
+                            active_layer = -1
+                            print("  Layer OFF")
+                        else:
+                            # Switch to a different layer
+                            if active_layer != -1:
+                                engine.set_layer(active_layer, False)
+                            active_layer = bi
+                            engine.set_layer(bi, True)
+                            print(f"  Layer {bi} ON")
 
         for i in range(3):
             btn_was_in[i] = btn_hovered[i]
@@ -244,7 +349,9 @@ def main() -> None:
 
         # ── Chord audio logic ──────────────────────────────────────────
         # Only hard-clear when both hands vanish; one-hand flicker uses segment silence below.
-        if left is None and right is None:
+        if theory_mode:
+            pass   # audio suppressed while theory overlay is open
+        elif left is None and right is None:
             engine.all_notes_off()
             silence_counter = 0
             committed_ls = committed_rs = None
@@ -290,7 +397,8 @@ def main() -> None:
             right_confirm_idx = right_seg,
         )
         btn_active_flags = [i == active_layer for i in range(3)]
-        frame = draw_buttons(frame, btn_active_flags, btn_hovered)
+        if synth_mode:
+            frame = draw_buttons(frame, btn_active_flags, btn_hovered)
         frame = draw_beat_button(frame, beat_active, beat_hovered)
         frame = draw_mode_button(frame, synth_mode, mode_hovered)
 
@@ -299,16 +407,67 @@ def main() -> None:
                           use_synth=synth_mode, theory_mode=theory_mode,
                           voice_lead=voice_lead, sync_mode=sync_mode)
 
+        if theory_mode:
+            left_fired, right_fired = update_dwell(theory_state, finger_tips, w, h)
+            if left_fired:
+                navigate(theory_state, -1)
+            if right_fired:
+                navigate(theory_state, +1)
+            frame = draw_theory_overlay(frame, theory_state, finger_tips)
+        if practice_mode:
+            frame = draw_practice_box(frame)
+
         cv2.imshow(WINDOW_NAME, frame)
-        key = cv2.waitKey(1) & 0xFF
+        raw_key = cv2.waitKey(1)
+        key     = raw_key & 0xFF
         if key in (ord("q"), ord("Q"), 27):
             break
         if key in (ord("t"), ord("T")):
-            theory_mode = not theory_mode
-            prev_left_seg   = -1
-            prev_right_seg  = -1
-            committed_ls = committed_rs = None
-            print(f"  Theory {'ON' if theory_mode else 'OFF'}")
+            if practice_mode:
+                # Close practice box, reopen theory overlay on same slide
+                practice_mode = False
+                theory_mode   = True
+                print("  Practice box OFF — theory restored")
+            else:
+                theory_mode = not theory_mode
+                if theory_mode:
+                    theory_state = TheoryState()
+                    engine.all_notes_off()
+                prev_left_seg  = -1
+                prev_right_seg = -1
+                committed_ls = committed_rs = None
+                print(f"  Theory {'ON' if theory_mode else 'OFF'}")
+        if key in (ord("x"), ord("X")):
+            if practice_mode:
+                # Cancel everything — close practice box and theory entirely
+                practice_mode = False
+                theory_mode   = False
+                engine.all_notes_off()
+                print("  Practice box cancelled")
+            elif (theory_mode
+                  and theory_state.screen     == "LESSON"
+                  and theory_state.lesson_idx == PRACTICE_SLIDE[0]
+                  and theory_state.step_idx   == PRACTICE_SLIDE[1]):
+                # On the trigger slide — open practice box
+                practice_mode = True
+                theory_mode   = False
+                print("  Practice mode ON")
+        # Theory overlay navigation
+        if theory_mode:
+            if theory_state.screen == "SELECTION":
+                if key == ord("0"):
+                    theory_state.screen     = "LESSON"
+                    theory_state.lesson_idx = 0
+                    theory_state.step_idx   = 0
+                elif key == ord("1"):
+                    theory_state.screen     = "LESSON"
+                    theory_state.lesson_idx = 1
+                    theory_state.step_idx   = 0
+            elif theory_state.screen == "LESSON":
+                if raw_key in _LEFT_KEYS:
+                    navigate(theory_state, -1)
+                elif raw_key in _RIGHT_KEYS:
+                    navigate(theory_state, +1)
         if key in (ord("v"), ord("V")):
             voice_lead = not voice_lead
             engine.set_voice_lead(voice_lead)

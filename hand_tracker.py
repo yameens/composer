@@ -32,26 +32,20 @@ WORLD_PINCH_PALM_FRAC    = 0.15    # threshold scales with wrist→middle-MCP le
 NORM_PINCH_FLOOR         = 0.035
 NORM_PINCH_PALM_FRAC     = 0.15
 
-# Pointing guard: index MCP→tip should be long enough we are not a closed fist…
+# Pointing guard: index MCP→tip should be long enough we are not a closed fist
 WORLD_INDEX_EXTEND_FLOOR_M   = 0.028
-WORLD_INDEX_EXTEND_PALM_FRAC = 0.26
+WORLD_INDEX_EXTEND_PALM_FRAC = 0.32
 NORM_INDEX_EXTEND_FLOOR      = 0.042
-NORM_INDEX_EXTEND_PALM_FRAC  = 0.26
+NORM_INDEX_EXTEND_PALM_FRAC  = 0.32
 
-# …unless index+middle are already tight (bypass ratio of thresh).
-PINCH_TIGHT_BYPASS_FRAC = 0.72
-
-# Middle MCP→tip longer than this ⇒ middle is “pointing” with index → ignore IM pinch unless tight.
-WORLD_MIDDLE_MAX_LEN_M    = 0.054
-WORLD_MIDDLE_MAX_LEN_FRAC = 0.48
-NORM_MIDDLE_MAX_LEN       = 0.078
-NORM_MIDDLE_MAX_LEN_FRAC  = 0.48
-
-# b9: index–middle pinch plus middle–ring cluster
-TRIPLE_THRESH_MULT = 1.08
+# Ring-cluster (b9 gesture): middle tip (12) ↔ ring tip (16)
+WORLD_RING_FLOOR_M   = 0.030
+WORLD_RING_PALM_FRAC = 0.18
+NORM_RING_FLOOR      = 0.040
+NORM_RING_PALM_FRAC  = 0.18
 
 PINCH_ON_FRAMES        = 2
-PINCH_OFF_FRAMES       = 5
+PINCH_OFF_FRAMES       = 2
 LANDMARK_DOT_RADIUS = 5
 ACTIVE_TIP_RADIUS   = 12
 PINCH_COLOUR        = (0, 215, 255)    # BGR gold — pinch highlight
@@ -81,8 +75,9 @@ class HandData:
     middle_tip:   tuple[int, int]         # landmark 12 (pixel coords)
     ring_tip:     tuple[int, int]         # landmark 16 (pixel coords)
     landmarks:    list[tuple[int, int]]   # all 21 landmarks (pixel coords)
-    pinch_active: bool = False            # debounced index+middle pinch (+ pointing/curl guard)
-    pinch_triple: bool = False            # IM pinch + middle–ring tight (b9 on right hand)
+    pinch_active:   bool = False          # debounced index+middle pinch (+ pointing/curl guard)
+    pinch_triple:   bool = False          # index+middle+ring cluster — b9 on right hand
+    index_extended: bool = False          # True when index MCP→tip length clears the fist threshold
 
 
 @dataclass
@@ -181,11 +176,10 @@ class HandTracker:
             else:
                 metrics = _pinch_metrics_norm(landmarks_norm)
 
-            d_im, d_mr, thresh, pinch_ok = metrics
-            thr_triple = thresh * TRIPLE_THRESH_MULT
+            d_im, d_mr, thresh_im, thresh_ring, pinch_ok = metrics
 
-            raw_pinch = (d_im < thresh) and pinch_ok
-            raw_triple = raw_pinch and (d_mr < thr_triple)
+            raw_pinch  = (d_im < thresh_im) and pinch_ok
+            raw_triple = raw_pinch and (d_mr < thresh_ring) and label == "Right"
 
             deb = self._debounce_pinch[label]
             pinch_active = _debounce_signal(
@@ -234,7 +228,7 @@ class HandTracker:
             wrist = lm_pixels[0]
             frame_bgr = _draw_text_pil(
                 frame_bgr,
-                label,
+                label.lower(),
                 (wrist[0], wrist[1] + 26),
                 _FONT_WRIST,
                 col["dot"],
@@ -249,6 +243,7 @@ class HandTracker:
                 landmarks=lm_pixels,
                 pinch_active=pinch_active,
                 pinch_triple=pinch_triple,
+                index_extended=pinch_ok,
             ))
 
         for lbl in ("Left", "Right"):
@@ -276,45 +271,42 @@ def _lm_xyz_dist(a: object, b: object) -> float:
     )
 
 
-def _pinch_metrics_world(world_lms: list) -> tuple[float, float, float, bool]:
+def _pinch_metrics_world(world_lms: list) -> tuple[float, float, float, float, bool]:
     """
-    Index–middle gap, middle–ring gap, pinch threshold, pinch_ok (guards vs fist / parallel point).
+    Returns (d_im, d_mr, thresh_im, thresh_ring, pinch_ok).
+    d_im  = index tip (8) ↔ middle tip (12) distance (IM pinch).
+    d_mr  = middle tip (12) ↔ ring tip (16) distance (ring-cluster b9).
+    pinch_ok = index extended enough that we are not in a closed fist.
     """
     palm = _lm_xyz_dist(world_lms[0], world_lms[9])
-    thresh = max(WORLD_PINCH_FLOOR_M, WORLD_PINCH_PALM_FRAC * palm)
-    d_im = _lm_xyz_dist(world_lms[8], world_lms[12])
+    thresh_im   = max(WORLD_PINCH_FLOOR_M, WORLD_PINCH_PALM_FRAC * palm)
+    thresh_ring = max(WORLD_RING_FLOOR_M,  WORLD_RING_PALM_FRAC  * palm)
+    d_im = _lm_xyz_dist(world_lms[8],  world_lms[12])
     d_mr = _lm_xyz_dist(world_lms[12], world_lms[16])
     idx_len = _lm_xyz_dist(world_lms[5], world_lms[8])
-    mid_len = _lm_xyz_dist(world_lms[9], world_lms[12])
     extend_min = max(
         WORLD_INDEX_EXTEND_FLOOR_M,
         WORLD_INDEX_EXTEND_PALM_FRAC * palm,
     )
-    mid_max = max(WORLD_MIDDLE_MAX_LEN_M, WORLD_MIDDLE_MAX_LEN_FRAC * palm)
-    tight = d_im < thresh * PINCH_TIGHT_BYPASS_FRAC
-    index_ok = (idx_len >= extend_min) or tight
-    middle_ok = (mid_len <= mid_max) or tight
-    pinch_ok = index_ok and middle_ok
-    return d_im, d_mr, thresh, pinch_ok
+    index_ok = (idx_len >= extend_min) and (world_lms[8].z < world_lms[6].z)
+    pinch_ok = index_ok
+    return d_im, d_mr, thresh_im, thresh_ring, pinch_ok
 
 
-def _pinch_metrics_norm(norm_lms: list) -> tuple[float, float, float, bool]:
+def _pinch_metrics_norm(norm_lms: list) -> tuple[float, float, float, float, bool]:
     palm = _lm_xyz_dist(norm_lms[0], norm_lms[9])
-    thresh = max(NORM_PINCH_FLOOR, NORM_PINCH_PALM_FRAC * palm)
-    d_im = _lm_xyz_dist(norm_lms[8], norm_lms[12])
+    thresh_im   = max(NORM_PINCH_FLOOR, NORM_PINCH_PALM_FRAC * palm)
+    thresh_ring = max(NORM_RING_FLOOR,  NORM_RING_PALM_FRAC  * palm)
+    d_im = _lm_xyz_dist(norm_lms[8],  norm_lms[12])
     d_mr = _lm_xyz_dist(norm_lms[12], norm_lms[16])
     idx_len = _lm_xyz_dist(norm_lms[5], norm_lms[8])
-    mid_len = _lm_xyz_dist(norm_lms[9], norm_lms[12])
     extend_min = max(
         NORM_INDEX_EXTEND_FLOOR,
         NORM_INDEX_EXTEND_PALM_FRAC * palm,
     )
-    mid_max = max(NORM_MIDDLE_MAX_LEN, NORM_MIDDLE_MAX_LEN_FRAC * palm)
-    tight = d_im < thresh * PINCH_TIGHT_BYPASS_FRAC
-    index_ok = (idx_len >= extend_min) or tight
-    middle_ok = (mid_len <= mid_max) or tight
-    pinch_ok = index_ok and middle_ok
-    return d_im, d_mr, thresh, pinch_ok
+    index_ok = (idx_len >= extend_min) and (norm_lms[8].y < norm_lms[6].y)
+    pinch_ok = index_ok
+    return d_im, d_mr, thresh_im, thresh_ring, pinch_ok
 
 
 def _debounce_signal(state: _DebouncedSignal, raw: bool, on_n: int, off_n: int) -> bool:
@@ -358,7 +350,7 @@ if __name__ == "__main__":
 
         y = 28
         for hd in hands:
-            line = f"{hd.label}: pinch={'Y' if hd.pinch_active else 'n'}  b9={'Y' if hd.pinch_triple else 'n'}"
+            line = f"{hd.label.lower()}: pinch={'Y' if hd.pinch_active else 'n'}  b9={'Y' if hd.pinch_triple else 'n'}"
             frame = _draw_text_pil(
                 frame,
                 line,

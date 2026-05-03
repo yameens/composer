@@ -1,0 +1,33 @@
+UI Layout
+centered modal card covering ~70% of screen width and height
+background: white with slight transparency (glass effect)
+text color: black
+font: georgia
+all text is lowercase including lesson headers
+lesson headers are bold
+Screens / States
+1. landing screen
+displays: “t for theory” ( we already have this )
+pressing “t” opens lesson selection screen
+2. lesson selection screen
+user selects lesson via keyboard:
+0 → lesson 0 (put the title of the lessons as well)
+1 → lesson 1
+2, 3 → disabled (ignore input or show “not available”)
+selected lesson opens lesson content screen
+3. lesson content screen
+content driven by lessonPlan.txt
+header stays fixed at top of modal
+body content scrolls or updates per step
+navigation controlled by arrows:
+bottom left: previous step
+bottom right: next step (steps determined by lessonPlan)
+Navigation rules
+arrows always remain visible in bottom corners
+clicking arrows advances or rewinds lesson steps (with hands or with left right arrows of keyboard)
+selecting lesson accepts only keyboard input
+Lesson progression rules
+follow step order defined in lessonPlan.txt
+do not move header during transitions that are specified
+only content updates per step
+for any (smiley face) type the standard ascii smiley face !

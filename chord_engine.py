@@ -75,8 +75,8 @@ CHORD_INTERVALS: dict[str, list[int]] = {
     "sus4": [0, 5, 7],
 }
 
-# 9th / b9 extension only available on these chord types
-SEVENTH_TYPES = {"Maj7", "min7", "7"}
+# chord types that accept a 9th or b9 extension (all except dim)
+NINE_COMPATIBLE_TYPES = {"Maj", "Maj7", "7", "Min", "min7", "sus4"}
 
 def voiced_chord_notes(
     root: str,
@@ -91,7 +91,7 @@ def voiced_chord_notes(
     bass = root - 24  (two octaves below)
     pad  = bass + chord's fifth interval  (consonant fifth above the bass)
 
-    9th / b9 are only inserted for SEVENTH_TYPES chords.
+    9th / b9 are only inserted for NINE_COMPATIBLE_TYPES chords.
     b9 is only available on dominant "7" (the G7 easter egg).
     """
     base = ROOT_MIDI[root]
@@ -100,7 +100,7 @@ def voiced_chord_notes(
     pad  = bass + iv[2]      # fifth above bass (uses b5 for half-dim automatically)
 
     extra: int | None = None
-    if chord_type in SEVENTH_TYPES:
+    if chord_type in NINE_COMPATIBLE_TYPES:
         if add_flat_nine and chord_type == "7":
             extra = base + 1   # b9 = root + minor 2nd
         elif add_nine:
