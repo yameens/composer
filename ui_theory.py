@@ -190,11 +190,32 @@ LESSON_TITLES: dict[int, str] = {
     1: "chord progressions & the circle of fifths",
 }
 
+# ── Chord progressions directory ───────────────────────────────────────────────
+# Each entry: title (lowercase display) + sequence string shown in practice box.
+
+PROGRESSIONS: dict[int, dict[str, str]] = {
+    1: {
+        "title":    "circle of fifths",
+        "sequence": "C + Maj7  |  F + Maj7  |  B + Dim  |  E + 7  |  A + Min7  |  D + Min7  |  G + 7",
+    },
+    2: {
+        "title":    "two five one",
+        "sequence": "D + Min7  |  G + 7  |  C + Maj7",
+    },
+    3: {
+        "title":    "falling two five one",
+        "sequence": (
+            "D + Min  |  G + 7  |  C + Maj7  |  C + Min  |  F + 7  |"
+            "  Bb + Maj7  |  Bb + Min  |  Eb + 7  |  Ab + Maj7"
+        ),
+    },
+}
+
 # ── State ──────────────────────────────────────────────────────────────────────
 
 @dataclass
 class TheoryState:
-    screen:      str = "SELECTION"   # "SELECTION" | "LESSON"
+    screen:      str = "SELECTION"   # "SELECTION" | "LESSON" | "PROGRESSIONS"
     lesson_idx:  int = 0
     step_idx:    int = 0
     left_dwell:  int = 0             # frames finger has been near left arrow
@@ -338,6 +359,8 @@ def draw_theory_overlay(
 
     if state.screen == "SELECTION":
         _draw_selection(draw, x1, y1, x2, y2)
+    elif state.screen == "PROGRESSIONS":
+        _draw_progressions(draw, x1, y1, x2, y2)
     else:
         _draw_lesson(draw, state, finger_tips, x1, y1, x2, y2)
 
@@ -379,8 +402,60 @@ def _draw_selection(
         draw.text((x1 + pad, iy), text, font=_FONT_ITEM, fill=colour)
         iy += rh
 
+    # Separator before progressions row
+    iy += 4
+    draw.line([(x1 + pad, iy), (x2 - pad, iy)], fill=_LGRAY, width=1)
+    iy += 14
+
+    # Progressions shortcut row
+    draw.text((x1 + pad, iy), "+  chord progressions", font=_FONT_ITEM, fill=_BLACK)
+
     # Hint
-    hint = "press a number to select   |   t to close"
+    hint = "press a number to select   |   +  for progressions   |   t to close"
+    hb   = draw.textbbox((0, 0), hint, font=_FONT_HINT)
+    hw   = hb[2] - hb[0]
+    hh   = hb[3] - hb[1]
+    draw.text(
+        (cx - hw // 2, y2 - pad - hh),
+        hint, font=_FONT_HINT, fill=_DGRAY,
+    )
+
+
+# ── Chord progressions directory screen ───────────────────────────────────────
+
+def _draw_progressions(
+    draw: ImageDraw.ImageDraw,
+    x1: int, y1: int, x2: int, y2: int,
+) -> None:
+    pad = 52
+    cx  = (x1 + x2) // 2
+
+    # Title
+    tb     = draw.textbbox((0, 0), "chord progressions", font=_FONT_TITLE, stroke_width=1)
+    tw, th = tb[2] - tb[0], tb[3] - tb[1]
+    ty     = y1 + pad
+    draw.text(
+        (cx - tw // 2, ty), "chord progressions",
+        font=_FONT_TITLE, fill=_BLACK, stroke_width=1, stroke_fill=_BLACK,
+    )
+
+    # Separator
+    sep_y = ty + th + 18
+    draw.line([(x1 + pad, sep_y), (x2 - pad, sep_y)], fill=_LGRAY, width=1)
+
+    # Progression rows
+    iy = sep_y + 26
+    rh = _line_h(_FONT_ITEM, draw) + 18
+    for idx, prog in PROGRESSIONS.items():
+        draw.text(
+            (x1 + pad, iy),
+            f"{idx}. {prog['title']}",
+            font=_FONT_ITEM, fill=_BLACK,
+        )
+        iy += rh
+
+    # Hint
+    hint = "press a number to practice   |   t to close"
     hb   = draw.textbbox((0, 0), hint, font=_FONT_HINT)
     hw   = hb[2] - hb[0]
     hh   = hb[3] - hb[1]
@@ -491,13 +566,13 @@ def _draw_dwell_arc(
 
 # ── Practice box ──────────────────────────────────────────────────────────────
 
-_PRACTICE_SEQUENCE = (
-    "c major  |  f major  |  b dim  |  e major  |  a minor  |  d minor  |  g major"
-)
 _PRACTICE_HINT = "x to cancel  |  t to go back to theory"
 
 
-def draw_practice_box(frame: np.ndarray) -> np.ndarray:
+def draw_practice_box(
+    frame:    np.ndarray,
+    sequence: str = "",
+) -> np.ndarray:
     """Overlay a translucent practice reference box below the chord circles.
 
     The box sits in the band between the circle bottoms and the footer strip,
@@ -531,7 +606,7 @@ def draw_practice_box(frame: np.ndarray) -> np.ndarray:
     inner_w = box_x2 - box_x1 - 48
     cx      = (box_x1 + box_x2) // 2
 
-    seq_lines = _wrap_text(_PRACTICE_SEQUENCE, _FONT_PRAC, inner_w, draw)
+    seq_lines = _wrap_text(sequence or PROGRESSIONS[1]["sequence"], _FONT_PRAC, inner_w, draw)
     seq_lh    = _line_h(_FONT_PRAC, draw) + 6
 
     hint_bb = draw.textbbox((0, 0), _PRACTICE_HINT, font=_FONT_PRAC_H)

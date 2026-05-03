@@ -30,7 +30,7 @@ from ui_buttons   import (draw_buttons, get_hovered_button,
                            draw_beat_button, get_hovered_beat_button,
                            draw_mode_button, get_hovered_mode_button)
 from ui_theory    import (TheoryState, draw_theory_overlay, update_dwell, navigate,
-                           draw_practice_box, PRACTICE_SLIDE)
+                           draw_practice_box, PRACTICE_SLIDE, PROGRESSIONS)
 from chord_engine  import ChordEngine
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -244,10 +244,11 @@ def main() -> None:
     # Voice-leading mode (toggled by V key)
     voice_lead = False
 
-    # Theory overlay (T key) and live practice box (also T, on trigger slide)
-    theory_mode   = False
-    theory_state  = TheoryState()
-    practice_mode = False
+    # Theory overlay (T key) and live practice box (X, on trigger slide / progressions)
+    theory_mode         = False
+    theory_state        = TheoryState()
+    practice_mode       = False
+    active_practice_seq = ""
 
     # Sync mode — avoid intermediate chords when root/type update one-at-a-time (S key)
     sync_mode = False
@@ -415,7 +416,7 @@ def main() -> None:
                 navigate(theory_state, +1)
             frame = draw_theory_overlay(frame, theory_state, finger_tips)
         if practice_mode:
-            frame = draw_practice_box(frame)
+            frame = draw_practice_box(frame, active_practice_seq)
 
         cv2.imshow(WINDOW_NAME, frame)
         raw_key = cv2.waitKey(1)
@@ -448,9 +449,10 @@ def main() -> None:
                   and theory_state.screen     == "LESSON"
                   and theory_state.lesson_idx == PRACTICE_SLIDE[0]
                   and theory_state.step_idx   == PRACTICE_SLIDE[1]):
-                # On the trigger slide — open practice box
-                practice_mode = True
-                theory_mode   = False
+                # On the trigger slide — open practice box (circle of fifths)
+                active_practice_seq = PROGRESSIONS[1]["sequence"]
+                practice_mode       = True
+                theory_mode         = False
                 print("  Practice mode ON")
         # Theory overlay navigation
         if theory_mode:
@@ -463,6 +465,15 @@ def main() -> None:
                     theory_state.screen     = "LESSON"
                     theory_state.lesson_idx = 1
                     theory_state.step_idx   = 0
+                elif key in (ord("+"), ord("=")):
+                    theory_state.screen = "PROGRESSIONS"
+            elif theory_state.screen == "PROGRESSIONS":
+                prog_key = {ord("1"): 1, ord("2"): 2, ord("3"): 3}.get(key)
+                if prog_key is not None and prog_key in PROGRESSIONS:
+                    active_practice_seq = PROGRESSIONS[prog_key]["sequence"]
+                    practice_mode       = True
+                    theory_mode         = False
+                    print(f"  Practice: {PROGRESSIONS[prog_key]['title']}")
             elif theory_state.screen == "LESSON":
                 if raw_key in _LEFT_KEYS:
                     navigate(theory_state, -1)
