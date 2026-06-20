@@ -7,13 +7,16 @@ All text is lowercase per lessonDesign.txt; Georgia font via app_font().
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from ui_circles import app_font, RADIUS
+import ui_circles
+from ui_circles import app_font, load_mono_font, _ARROW_CHARS
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -38,9 +41,16 @@ _FONT_HEADER = app_font(34)
 _FONT_BODY   = app_font(22)
 _FONT_ITEM   = app_font(21)
 _FONT_HINT   = app_font(14)
+_FONT_HINT_MONO = load_mono_font(14)   # FiraMono at same size — has arrow glyphs
 _FONT_ARROW  = app_font(30)
-_FONT_PRAC   = app_font(20)   # practice box body
-_FONT_PRAC_H = app_font(16)   # practice box hint line
+_PRAC_FONT_CACHE: dict[int, ImageFont.FreeTypeFont] = {}
+
+def _prac_font(size: int) -> ImageFont.FreeTypeFont:
+    f = _PRAC_FONT_CACHE.get(size)
+    if f is None:
+        f = app_font(size)
+        _PRAC_FONT_CACHE[size] = f
+    return f
 
 # ── Colors (PIL RGBA) ──────────────────────────────────────────────────────────
 
@@ -211,6 +221,94 @@ PROGRESSIONS: dict[int, dict[str, str]] = {
     },
 }
 
+# ── Progression files (popular + personal favorites) ────────────────────────────
+# Parsed from theory/chordProgression/*.txt into a flat, ordered list of items.
+# Each item is either {"kind": "header", "label": ...} (a key-section heading,
+# non-selectable) or {"kind": "prog", "title": ..., "sequence": ...} where
+# sequence is the practice-box display string ("A + Min  |  E + 7  |  ...").
+
+_PROG_DIR = Path(__file__).parent / "theory" / "chordProgression"
+
+# Chord-suffix → display-type map.  Bare token (major triad) → "Maj".
+_CHORD_SUFFIX = {
+    "":      "Maj",
+    "m":     "Min",
+    "maj7":  "Maj7",
+    "m7":    "Min7",
+    "7":     "7",
+    "dim":   "Dim",
+    "+":     "Aug",
+    "aug":   "Aug",
+    "6":     "6",
+    "9":     "9",
+    "m7b5":  "Min7b5",
+}
+
+
+def _chord_to_display(token: str) -> str:
+    """'Am' → 'A + Min', 'E7' → 'E + 7', 'Cdim' → 'C + Dim', 'A+' → 'A + Aug'."""
+    token = token.strip()
+    if not token:
+        return ""
+    root = token[0]
+    i = 1
+    if i < len(token) and token[i] in "#b":
+        root += token[i]
+        i += 1
+    suffix = token[i:].strip()
+    typ = _CHORD_SUFFIX.get(suffix.lower(), suffix)   # unknown suffix → verbatim
+    return f"{root} + {typ}"
+
+
+def _seq_to_display(line: str) -> str:
+    """'Am - E7 - Am' → 'A + Min  |  E + 7  |  A + Min'."""
+    tokens = [t for t in line.split("-") if t.strip()]
+    return "  |  ".join(_chord_to_display(t) for t in tokens)
+
+
+def _parse_progression_file(path: Path) -> list[dict]:
+    """Parse a chordProgressions-format txt into ordered header/prog items."""
+    if not path.exists():
+        return []
+    items: list[dict] = []
+    lines = path.read_text(encoding="utf-8").splitlines()
+    n = len(lines)
+    i = 0
+    while i < n:
+        raw = lines[i].strip()
+        if not raw:
+            i += 1
+            continue
+        # Section header: wrapped in em-dashes, e.g. "— A MINOR —"
+        if raw.startswith("—") and raw.endswith("—"):
+            label = raw.strip("—").strip().lower()
+            items.append({"kind": "header", "label": label})
+            i += 1
+            continue
+        # Title line: "[3] Classic Minor Cadence"
+        m = re.match(r"^\[\d+\]\s*(.+)$", raw)
+        if m:
+            title = m.group(1).strip().lower()   # theory overlay is all-lowercase
+            # next non-blank line is the chord sequence
+            j = i + 1
+            while j < n and not lines[j].strip():
+                j += 1
+            if j < n:
+                items.append({
+                    "kind":     "prog",
+                    "title":    title,
+                    "sequence": _seq_to_display(lines[j].strip()),
+                })
+                i = j + 1
+                continue
+        i += 1
+    return items
+
+
+POPULAR_ITEMS  = _parse_progression_file(_PROG_DIR / "chordProgressions.txt")
+FAVORITE_ITEMS = _parse_progression_file(_PROG_DIR / "favorites.txt")
+
+
 # ── State ──────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -220,6 +318,41 @@ class TheoryState:
     step_idx:    int = 0
     left_dwell:  int = 0             # frames finger has been near left arrow
     right_dwell: int = 0             # frames finger has been near right arrow
+    prog_tab:    int = 0             # 0 = popular, 1 = personal favorites
+    prog_cursor: int = 0            # index into current tab's selectable rows
+    prog_scroll: int = 0            # first visible item row (windowed scroll)
+
+
+# ── Progressions-browser navigation ─────────────────────────────────────────────
+
+def _prog_items(state: TheoryState) -> list[dict]:
+    return POPULAR_ITEMS if state.prog_tab == 0 else FAVORITE_ITEMS
+
+
+def _prog_selectable(items: list[dict]) -> list[int]:
+    """Absolute indices of selectable (prog) rows."""
+    return [i for i, it in enumerate(items) if it["kind"] == "prog"]
+
+
+def prog_move_cursor(state: TheoryState, direction: int) -> None:
+    sel = _prog_selectable(_prog_items(state))
+    if not sel:
+        return
+    state.prog_cursor = max(0, min(len(sel) - 1, state.prog_cursor + direction))
+
+
+def prog_switch_tab(state: TheoryState, direction: int) -> None:
+    state.prog_tab    = 0 if state.prog_tab + direction <= 0 else 1
+    state.prog_cursor = 0
+    state.prog_scroll = 0
+
+
+def prog_selected_sequence(state: TheoryState) -> str | None:
+    items = _prog_items(state)
+    sel   = _prog_selectable(items)
+    if not sel or state.prog_cursor >= len(sel):
+        return None
+    return items[sel[state.prog_cursor]]["sequence"]
 
 
 def navigate(state: TheoryState, direction: int) -> None:
@@ -360,7 +493,7 @@ def draw_theory_overlay(
     if state.screen == "SELECTION":
         _draw_selection(draw, x1, y1, x2, y2)
     elif state.screen == "PROGRESSIONS":
-        _draw_progressions(draw, x1, y1, x2, y2)
+        _draw_progressions(draw, x1, y1, x2, y2, state)
     else:
         _draw_lesson(draw, state, finger_tips, x1, y1, x2, y2)
 
@@ -423,9 +556,13 @@ def _draw_selection(
 
 # ── Chord progressions directory screen ───────────────────────────────────────
 
+_PROG_TABS = ("popular progressions", "personal favorites")
+
+
 def _draw_progressions(
     draw: ImageDraw.ImageDraw,
     x1: int, y1: int, x2: int, y2: int,
+    state: TheoryState,
 ) -> None:
     pad = 52
     cx  = (x1 + x2) // 2
@@ -439,30 +576,94 @@ def _draw_progressions(
         font=_FONT_TITLE, fill=_BLACK, stroke_width=1, stroke_fill=_BLACK,
     )
 
-    # Separator
-    sep_y = ty + th + 18
+    # ── Tab row ─────────────────────────────────────────────────────────────
+    tab_y   = ty + th + 22
+    tab_gap = 40
+    widths  = []
+    for label in _PROG_TABS:
+        lb = draw.textbbox((0, 0), label, font=_FONT_ITEM)
+        widths.append(lb[2] - lb[0])
+    total_w = sum(widths) + tab_gap
+    tx      = cx - total_w // 2
+    tab_h   = _line_h(_FONT_ITEM, draw)
+    for i, label in enumerate(_PROG_TABS):
+        active = (i == state.prog_tab)
+        draw.text((tx, tab_y), label, font=_FONT_ITEM,
+                  fill=_BLACK if active else _GRAY)
+        if active:
+            draw.line([(tx, tab_y + tab_h + 5), (tx + widths[i], tab_y + tab_h + 5)],
+                      fill=_GOLD, width=2)
+        tx += widths[i] + tab_gap
+
+    # Separator under tabs
+    sep_y = tab_y + tab_h + 16
     draw.line([(x1 + pad, sep_y), (x2 - pad, sep_y)], fill=_LGRAY, width=1)
 
-    # Progression rows
-    iy = sep_y + 26
-    rh = _line_h(_FONT_ITEM, draw) + 18
-    for idx, prog in PROGRESSIONS.items():
-        draw.text(
-            (x1 + pad, iy),
-            f"{idx}. {prog['title']}",
-            font=_FONT_ITEM, fill=_BLACK,
-        )
-        iy += rh
+    # ── Hint line (compute first so the list knows its lower bound) ──────────
+    # Arrows render in FiraMono (which contains them); other chars stay in
+    # _FONT_HINT (Georgia). Measure total width first for centring.
+    hint = "↑ ↓ move   •   enter to practice   •   ← → tabs   •   t to close"
+    _hint_runs: list[tuple[str, bool]] = []
+    _buf = hint[0]; _is_arr = hint[0] in _ARROW_CHARS
+    for _ch in hint[1:]:
+        _a = _ch in _ARROW_CHARS
+        if _a == _is_arr:
+            _buf += _ch
+        else:
+            _hint_runs.append((_buf, _is_arr))
+            _buf = _ch; _is_arr = _a
+    _hint_runs.append((_buf, _is_arr))
+    _run_ws = [draw.textlength(rt, font=(_FONT_HINT_MONO if ia else _FONT_HINT))
+               for rt, ia in _hint_runs]
+    hw  = int(sum(_run_ws))
+    hh  = _FONT_HINT.getmetrics()[0] + _FONT_HINT.getmetrics()[1]
+    hint_y = y2 - pad - hh
+    _hx = cx - hw // 2
+    for (rt, ia), rw in zip(_hint_runs, _run_ws):
+        _font = _FONT_HINT_MONO if ia else _FONT_HINT
+        draw.text((_hx, hint_y), rt, font=_font, fill=_DGRAY)
+        _hx += int(rw)
 
-    # Hint
-    hint = "press a number to practice   |   t to close"
-    hb   = draw.textbbox((0, 0), hint, font=_FONT_HINT)
-    hw   = hb[2] - hb[0]
-    hh   = hb[3] - hb[1]
-    draw.text(
-        (cx - hw // 2, y2 - pad - hh),
-        hint, font=_FONT_HINT, fill=_DGRAY,
-    )
+    # ── List window ─────────────────────────────────────────────────────────
+    items = _prog_items(state)
+    sel   = _prog_selectable(items)
+
+    if not sel:
+        msg = "no favorites yet — add them in favorites.txt"
+        mb  = draw.textbbox((0, 0), msg, font=_FONT_ITEM)
+        mw  = mb[2] - mb[0]
+        draw.text((cx - mw // 2, (sep_y + hint_y) // 2), msg,
+                  font=_FONT_ITEM, fill=_GRAY)
+        return
+
+    list_top = sep_y + 18
+    list_bot = hint_y - 14
+    rh       = _line_h(_FONT_ITEM, draw) + 12
+    visible  = max(1, (list_bot - list_top) // rh)
+
+    # Keep the highlighted prog row inside the visible window.
+    sel_abs = sel[state.prog_cursor]
+    if sel_abs < state.prog_scroll:
+        state.prog_scroll = sel_abs
+    elif sel_abs >= state.prog_scroll + visible:
+        state.prog_scroll = sel_abs - visible + 1
+    state.prog_scroll = max(0, min(state.prog_scroll, max(0, len(items) - visible)))
+
+    iy = list_top
+    for abs_i in range(state.prog_scroll, min(len(items), state.prog_scroll + visible)):
+        it = items[abs_i]
+        if it["kind"] == "header":
+            draw.text((x1 + pad, iy), it["label"], font=_FONT_HINT, fill=_GRAY)
+        else:
+            selected = (abs_i == sel_abs)
+            if selected:
+                draw.rounded_rectangle(
+                    [x1 + pad - 14, iy - 4, x2 - pad + 14, iy + rh - 10],
+                    radius=6, fill=(235, 225, 190, 255),
+                )
+            draw.text((x1 + pad, iy), it["title"], font=_FONT_ITEM,
+                      fill=_BLACK if not selected else (90, 70, 0, 255))
+        iy += rh
 
 
 # ── Lesson content screen ──────────────────────────────────────────────────────
@@ -567,6 +768,7 @@ def _draw_dwell_arc(
 # ── Practice box ──────────────────────────────────────────────────────────────
 
 _PRACTICE_HINT = "x to cancel  |  t to go back to theory"
+_MIN_BOX_H     = 56
 
 
 def draw_practice_box(
@@ -582,8 +784,10 @@ def draw_practice_box(
     fh, fw = frame.shape[:2]
 
     # Vertical bounds — circle bottom → footer top
-    box_top    = fh // 2 + RADIUS + 12
+    # Clamp box_top upward so the box is never shorter than _MIN_BOX_H,
+    # allowing it to slightly overlap the lower part of enlarged circles.
     box_bottom = fh - _FOOTER_H - 12
+    box_top    = min(fh // 2 + ui_circles.RADIUS + 12, box_bottom - _MIN_BOX_H)
     box_x1     = int(fw * 0.08)
     box_x2     = int(fw * 0.92)
 
@@ -606,25 +810,35 @@ def draw_practice_box(
     inner_w = box_x2 - box_x1 - 48
     cx      = (box_x1 + box_x2) // 2
 
-    seq_lines = _wrap_text(sequence or PROGRESSIONS[1]["sequence"], _FONT_PRAC, inner_w, draw)
-    seq_lh    = _line_h(_FONT_PRAC, draw) + 6
+    seq_text = sequence or PROGRESSIONS[1]["sequence"]
+    avail_h  = (box_bottom - box_top) - 10
+    body_f = hint_f = None
+    seq_lines = []; seq_lh = hint_h = hint_w = 0
+    for size in range(20, 9, -1):
+        bf = _prac_font(size)
+        hf = _prac_font(max(size - 4, 9))
+        lines = _wrap_text(seq_text, bf, inner_w, draw)
+        lh    = _line_h(bf, draw) + 4
+        hb    = draw.textbbox((0, 0), _PRACTICE_HINT, font=hf)
+        hh    = hb[3] - hb[1]
+        total = len(lines) * lh + 8 + hh
+        body_f, hint_f = bf, hf
+        seq_lines, seq_lh, hint_h, hint_w = lines, lh, hh, hb[2] - hb[0]
+        if total <= avail_h:
+            break
 
-    hint_bb = draw.textbbox((0, 0), _PRACTICE_HINT, font=_FONT_PRAC_H)
-    hint_h  = hint_bb[3] - hint_bb[1]
-    hint_w  = hint_bb[2] - hint_bb[0]
-
-    total_h = len(seq_lines) * seq_lh + 14 + hint_h
+    total_h = len(seq_lines) * seq_lh + 8 + hint_h
     box_mid = (box_top + box_bottom) // 2
     seq_y   = box_mid - total_h // 2
 
     for line in seq_lines:
         if line:
-            lb  = draw.textbbox((0, 0), line, font=_FONT_PRAC)
+            lb  = draw.textbbox((0, 0), line, font=body_f)
             lw  = lb[2] - lb[0]
-            draw.text((cx - lw // 2, seq_y), line, font=_FONT_PRAC, fill=_WHITE)
+            draw.text((cx - lw // 2, seq_y), line, font=body_f, fill=_WHITE)
         seq_y += seq_lh
 
-    hint_y = seq_y + 10
-    draw.text((cx - hint_w // 2, hint_y), _PRACTICE_HINT, font=_FONT_PRAC_H, fill=_WHITE)
+    hint_y = seq_y + 8
+    draw.text((cx - hint_w // 2, hint_y), _PRACTICE_HINT, font=hint_f, fill=_WHITE)
 
     return cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)

@@ -1,0 +1,448 @@
+— A MINOR —
+
+[1] Basic Minor Resolution
+Am - E7 - Am
+
+[2] Minor Rocking Chair
+Am - Dm - Am
+
+[3] Classic Minor Cadence
+Am - Dm - E7 - Am
+
+[4] IV-Minor Swing
+Dm - F - Dm - E7
+
+[5] Diminished Approach
+Am - Adim - E7 - Am
+
+[6] Edim Approach
+Am - Edim - E7 - Am
+
+[7] Chromatic Diminished Walk
+Am - A#dim - Dm - E7
+
+[8] Secondary Dominant Insertion
+Am - F - B7 - E7 - Am
+
+[9] Diminished IV Approach
+Am - Adim - Dm - E7
+
+[10] Augmented Color Loop
+Am - E+ - Am
+
+[11] Extended Diminished Walk
+Am - Adim - Am - B7 - Dm - E7
+
+[12] B7 Chain to Tonic
+Am - B7 - E7 - Am
+
+[13] Back-and-Forth Minor
+Am - Dm - Am - E7 - Am
+
+[14] Relative Major Bridge
+Am - C - Dm - Am
+
+[15] Borrowed Dominant Dip
+Am - D7 - Am
+
+[16] Major Passage
+Am - C - F - Fm - C
+
+[17] Chromatic Inner Voice
+Am - Em - F7 - E7 - Am
+
+[18] VII7 Float
+Am - G7 - Dm - E7
+
+[19] Extended Jazz Walk
+Am - F7 - Dm - G7 - C - A+ - Dm
+
+[20] Diminished Tritone Drop
+Am - F - A#dim - E7
+
+[21] Blues-Minor Crossover
+Am - C7 - F - Am
+
+[22] Chromatic Mediant Web
+Am - C7 - Dm - B7 - Em - C#dim - F
+
+[23] Descending Seventh Chain
+Am - C - G7 - F7 - Dm - E7
+
+[24] Major Loop in Minor
+Am - C - F - A7 - Am
+
+[25] Secondary to Subdominant
+Am - F - A7 - Dm
+
+[26] Major Interlude
+Am - C - F - E7 - Am
+
+[27] Subdominant Oscillation
+Am - Dm - C - Dm - Am
+
+[28] Double Secondary Dominant
+Am - A7 - D7 - Am
+
+[29] Chromatic Turnaround
+Am - Dm - Ab7 - G7 - Am - B7 - E7 - Am
+
+[30] Chromatic Descent
+Am - A7 - Ab7 - G7 - F#7 - B7 - E7 - Am
+
+[31] Parallel Minor Walk-Down
+Am - Gm - Fm - Ab7 - Am
+
+[32] Chromatic Dominant Compression
+Am - C7 - B7 - Bb7 - Am
+
+[33] B7 Through Diminished
+Am - F - Am - B7 - A#dim - Dm - E7
+
+[34] Mediant Detour
+Am - Em - F7 - Dm - E7
+
+[35] IV-V via Secondary
+A7 - Dm - B7 - E7
+
+[36] Oscillating Secondary
+A7 - Adim - A7 - B7 - Dm - E7
+
+[37] Straight IV-V
+A7 - Dm - E7
+
+[38] Back-Cycling Loop
+B7 - Dm - E7 - Am
+
+[39] Subdominant-Dominant Pendulum
+Dm - E7 - Dm - E7
+
+[40] Flatted Seventh Resolve
+Dm - Bb7 - Am
+
+[41] Secondary Bridge
+B7 - Dm - C - F7 - Dm - Am
+
+[42] Half-Step Chromatic
+Dm - F - G7 - F#7 - Dm - E7
+
+[43] Major Loop
+C - G7 - C
+
+[44] Major to Minor Bridge
+C - G7 - Dm - E7
+
+[45] Tritone Sub Approach
+C - F7 - B7 - E7 - Am
+
+[46] Augmented Dominant Cadence
+C - F - Dm - E+ - Am
+
+[47] Minor IV Surprise
+A7 - Cm - Dm - E7
+
+[48] Dominant Release
+C7 - F - E7
+
+[49] Classic Pop Loop
+C - Am - Dm - G7
+
+[50] V to Minor
+G - Am - Dm - G7
+
+[51] Full Circle Major-to-Minor
+C - F - G7 - C - A7 - Dm - E7 - Am
+
+[52] Subdominant Escape
+Dm - G7 - F
+
+[53] IV Returns Home
+Dm - Am - F - Dm - E7
+
+[54] Floating Subdominant
+Dm - E7 - C - Dm
+
+[55] Chromatic Diminished Web
+Dm - C7 - F - Adim - E7 - A#dim - Dm
+
+[56] Double Diminished Approach
+Dm - E7 - Edim - E7 - Am
+
+[57] D7 Opening
+D7 - Am - F7 - E7
+
+[58] Stepwise Descent
+Dm - Am - Gm - F
+
+[59] Em Detour
+Em - C - B7 - E7
+
+[60] Chromatic Em Exit
+Em - F7 - Dm
+
+[61] Diminished Shimmer
+E7 - C#dim - E7 - Dm
+
+[62] Oscillating Jazz Vamp
+Em7 - A7 - Em7 - A7
+
+[63] F to Am via C
+F - G7 - C - E7 - Am
+
+[64] IV-I-ii-I
+F - C - Dm - A
+
+[65] Minor Detour via G
+F - G - Cm - F - Am
+
+[66] Em Through C7
+F - C7 - Em - F - E7
+
+[67] Augmented Cadence
+F - E+ - Am
+
+[68] Unexpected G Jump
+F - E7 - G - F
+
+[69] Major Plagal Cadence
+F - Gm - C7 - F
+
+[70] Dominant to B7
+G7 - C - B7 - E7
+
+
+— C MAJOR —
+
+[1] Basic Tonic-Dominant Loop
+C - G7 - C
+
+[2] Basic Plagal Loop
+C - F - C
+
+[3] Dominant Approach
+C - G7 - G - G7
+
+[4] The 50s Progression
+C - Am - Dm - G7
+
+[5] Cdim Passing
+C - Cdim - G7 - C
+
+[6] Gdim Passing
+C - Gdim - G7 - C
+
+[7] Chromatic Diminished Approach
+C - C#dim - Dm - G7
+
+[8] Secondary Dominant Loop
+C - A7 - Dm - G7 - C
+
+[9] Diminished to IIm7
+C - Cdim - Dm7 - G7
+
+[10] Leading Tone Step
+C - B - C
+
+[11] Augmented Dominant
+C - G+ - C
+
+[12] Extended Secondary Chain
+C - Cdim - C - D7 - Dm7 - G7
+
+[13] Cycle of Fifths
+C - A7 - D7 - G7 - C
+
+[14] Rock Staple
+C - F - C - G7
+
+[15] ii-V Setup
+C - Dm - G7
+
+[16] Minor Subdominant Color
+C - G7 - F - Fm - C
+
+[17] Minor IV Dip
+C - F - Fm - C
+
+[18] Blues Tinge
+C - F7 - C
+
+[19] Backdoor Dominant
+C - Bb7 - C
+
+[20] Jazz Minor Detour
+C - Gm - A7 - D7 - G7 - C
+
+[21] Deceptive Cadence
+C - Dm - G7 - Am
+
+[22] Chromatic Web
+C - A7 - Dm - B7 - Em - C#dim - F
+
+[23] Descending Secondary Dominants
+C - E7 - A7 - Dm
+
+[24] Secondary Chain Variant
+C - E7 - A7 - Dm - G7
+
+[25] Full Cycle of Fifths
+C - B7 - E7 - A7 - Dm - G7 - C
+
+[26] Cycle with Minor IV
+C - A7 - D7 - G7 - Dm - G7 - Fm
+
+[27] Jazz Major Walk
+C - Em - Am - C7 - Fm
+
+[28] Augmented Opening
+C - C+ - Am - G7 - Fm
+
+[29] Tritone Sub ii-V
+C - Dm - Ab7 - G7 - C
+
+[30] II Chord Vamp
+C - Dm - Dm - C
+
+[31] Extended Dominant Riff
+C - G7 - C - G7 - Dm - G7 - C
+
+[32] Am Detour Loop
+C - Dm - E7 - Am - G - D7 - G - C
+
+[33] Chromatic Dominant Spiral
+C - G7 - Bb7 - Ab7 - D7 - G7 - C
+
+[34] Chromatic Dominant Cascade
+C - G7 - B7 - Bb7 - A7 - D7 - G7 - C
+
+[35] Half-Step Dominant Descent
+C - Eb7 - D7 - Db7 - C
+
+[36] Bb7 Passing
+C - Bb7 - Dm - G7
+
+[37] Cdim to IIm7 Extension
+C - Em - Am - C#dim - Dm7 - G7
+
+[38] Ab7 Tritone Bridge
+C - Ab7 - Dm - G7
+
+[39] Ab7 Extended Loop
+C - Ab7 - C - Cdim - Dm7 - G7
+
+[40] Gm Color Loop
+C - Gm - Cm - A7 - Fm - G7 - C
+
+[41] D7 Bridge
+C - G7 - F - D7 - G7 - C
+
+[42] C#dim Passing
+C - G7 - C#dim - Dm - G7
+
+[43] Chromatic IV Loop
+C - F - C#dim - G7 - F - C
+
+[44] D7 Secondary Opening
+D7 - Fm - G7 - C
+
+[45] D-Dm Crossover
+D7 - Dm - Dm7 - G7
+
+[46] Dm7 to Db7 Compression
+Dm7 - Db7 - C
+
+[47] Tritone Sub ii Loop
+Dm - Ab7 - A7 - Dm - G7
+
+[48] Dm-Fm Chromatic Approach
+Dm - A7 - Bb7 - A7 - Dm - Fm - G7
+
+[49] Em Tonic Minor Loop
+Em - B7 - Em
+
+[50] Em Approach Chain
+Em - D7 - Dm7 - G7
+
+[51] Em to Major via V
+Em - Am - D7 - G7 - C
+
+[52] Em Chromatic Approach
+Em - Am - Dm - G#dim - C
+
+[53] Em Extended Walk
+Em - Am - Dm - Em7 - G7
+
+[54] Em to Major Cadence
+Em - Am - D7 - G7 - C
+
+[55] E7 Secondary Chain
+E7 - Am - D7 - G7
+
+[56] E7 Chromatic Step-Down
+E7 - Eb7 - D7 - G7
+
+[57] E-F#m Minor Loop
+E - F#m - B7 - E
+
+[58] F-E7 Approach
+F - E7 - Am
+
+[59] F-A7 Chromatic Bridge
+F - Bc - A7 - Fm - G7 - C
+
+[60] Minor IV Walk
+F - Fm - C - Am - Dm - G7
+
+[61] Fm Dip
+F - Fm - C - Am - G7
+
+[62] Fm Minor Vamp
+Fm - Gm - Am7
+
+[63] F-E7 Chromatic Loop
+F - E7 - Am - Cdim - Dm - Adim - Dm
+
+[64] Fm to G Bridge
+Fm - G7 - C - G
+
+[65] F7 Blues Open
+F7 - C - Ab7 - G7
+
+[66] Fm Color Vamp
+Fm - C - Am - Am
+
+[67] G-Am Secondary Walk
+G - Am - D7 - G7
+
+[68] G7 Chromatic Approach
+G7 - Ebdim - G7 - G# - C
+
+[69] G7-Dm Crossover
+G7 - Dm - G7 - Gm - C
+
+[70] G-Ebdim Chromatic
+G - Ebdim - Cm - G
+
+[71] Ab-Eb7 Bridge
+Ab - Eb7 - Ab - G7 - C
+
+[72] Am Walk-Down
+Am - Em - Dm - C
+
+[73] Am-B Half-Step Loop
+Am - B - Am - A - Dm
+
+[74] Am Extended Bridge
+Am - E7 - Gm - A7 - Fm - G7 - C
+
+[75] Am Augmented Open
+Am - C+ - C
+
+[76] Ab-G7 Approach
+Ab - G7 - Em - Am
+
+[77] Ab Chromatic to C
+Ab - Eb7 - Ab - G7 - C
+
+[78] B7 to G7 Chain
+B7 - Em - D7 - G7

@@ -2,3 +2,6 @@ opencv-python
 mediapipe
 pyfluidsynth
 Pillow
+sounddevice
+soundfile
+pyobjc-framework-AVFoundation

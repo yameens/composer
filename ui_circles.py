@@ -65,6 +65,12 @@ def _resolve_accent_font_path() -> Optional[Path]:
     return None
 
 
+def _resolve_mono_font_path() -> Optional[Path]:
+    """FiraMono — bundled monospace font that contains arrow glyphs."""
+    p = Path(__file__).parent / "assets" / "FiraMono-Regular.ttf"
+    return p if p.exists() else None
+
+
 def _resolve_body_font_path() -> Optional[Path]:
     """Georgia for main UI (circles, top HUD, buttons); then Calibri / Fira."""
     assets_dir = Path(__file__).parent / "assets"
@@ -97,7 +103,8 @@ def _resolve_body_font_path() -> Optional[Path]:
 
 
 _FONT_PATH_ACCENT = _resolve_accent_font_path()
-_FONT_PATH_BODY = _resolve_body_font_path()
+_FONT_PATH_BODY   = _resolve_body_font_path()
+_FONT_PATH_MONO   = _resolve_mono_font_path()
 
 
 def _load_body_font(size: int) -> ImageFont.FreeTypeFont:
@@ -118,9 +125,29 @@ def _load_accent_font(size: int) -> ImageFont.FreeTypeFont:
     return _load_body_font(size)
 
 
+def _load_mono_font(size: int) -> ImageFont.FreeTypeFont:
+    """FiraMono — contains arrow glyphs missing from Georgia and Jacquard."""
+    if _FONT_PATH_MONO:
+        try:
+            return ImageFont.truetype(str(_FONT_PATH_MONO), size)
+        except Exception:
+            pass
+    return _load_body_font(size)
+
+
 def app_font(size: int) -> ImageFont.FreeTypeFont:
     """Body / UI typeface (Georgia when available)."""
     return _load_body_font(size)
+
+
+def load_accent_font(size: int) -> ImageFont.FreeTypeFont:
+    """Public wrapper — load the Jacquard accent font at any size."""
+    return _load_accent_font(size)
+
+
+def load_mono_font(size: int) -> ImageFont.FreeTypeFont:
+    """Public wrapper — load the FiraMono font at any size (contains arrow glyphs)."""
+    return _load_mono_font(size)
 
 
 _FONT_LG    = _load_body_font(28)   # root letters, HUD chord readout
@@ -240,6 +267,457 @@ def _draw_text_pil(
 _BRAND_PNG = Path(__file__).parent / "assets" / "conductor_brand.png"
 
 
+# ── Sprite cache & alpha-composite helpers ────────────────────────────────────
+# Static UI is rendered to BGRA sprites once (PIL roundtrip is paid up-front),
+# then alpha-blitted onto the camera frame each tick. Per-frame text/circle
+# rendering is replaced with cheap memory copies + per-pixel premultiplied
+# alpha math, so the main loop stops paying ~30 full-frame BGR↔RGB conversions
+# and ~14 full-frame copies that previously bottlenecked drawing.
+
+_CIRCLE_PAD = 6                                         # AA padding around each circle bbox
+_CIRCLE_SPRITE_SIZE = 2 * RADIUS + 2 * _CIRCLE_PAD
+
+
+def _premul_color(bgr: tuple[int, int, int], alpha: float) -> tuple[int, int, int, int]:
+    """Return a 4-tuple BGRA in *premultiplied* form for cv2 drawing."""
+    a8 = max(0, min(255, int(round(alpha * 255))))
+    return (
+        int(bgr[0]) * a8 // 255,
+        int(bgr[1]) * a8 // 255,
+        int(bgr[2]) * a8 // 255,
+        a8,
+    )
+
+
+def _to_premul(bgra: np.ndarray) -> np.ndarray:
+    """Convert a non-premultiplied BGRA sprite to premultiplied form, in place."""
+    a = bgra[..., 3:4].astype(np.uint16)
+    bgra[..., :3] = (bgra[..., :3].astype(np.uint16) * a // 255).astype(np.uint8)
+    return bgra
+
+
+def _blit_bgra(frame: np.ndarray, sprite: Optional[np.ndarray], x: int, y: int) -> None:
+    """Alpha-composite a *premultiplied* BGRA sprite onto a BGR frame in place.
+
+    (x, y) is the top-left of the sprite in frame coordinates. Pixels falling
+    outside the frame are clipped. No-op if sprite is None or fully transparent.
+    """
+    if sprite is None:
+        return
+    sh, sw = sprite.shape[:2]
+    fh, fw = frame.shape[:2]
+    x1, y1 = max(x, 0), max(y, 0)
+    x2 = min(x + sw, fw)
+    y2 = min(y + sh, fh)
+    if x2 <= x1 or y2 <= y1:
+        return
+    sx1, sy1 = x1 - x, y1 - y
+    sx2 = sx1 + (x2 - x1)
+    sy2 = sy1 + (y2 - y1)
+    sub_sprite = sprite[sy1:sy2, sx1:sx2]
+    sub_frame = frame[y1:y2, x1:x2]
+    a = sub_sprite[..., 3]
+    if a.max() == 0:
+        return
+    a16 = a.astype(np.uint16)[..., None]
+    inv = (np.uint16(255) - a16)
+    bgr_pre = sub_sprite[..., :3].astype(np.uint16)
+    sub_frame[:] = (bgr_pre + sub_frame.astype(np.uint16) * inv // 255).astype(np.uint8)
+
+
+def _make_text_sprite(
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    color_bgr: tuple[int, int, int],
+    *,
+    bold: bool = False,
+    underline: bool = False,
+    letter_spacing: int = 0,
+    underline_gap: int = 2,
+) -> tuple[np.ndarray, int, int, int]:
+    """Render text into a tightly-cropped premultiplied BGRA sprite.
+
+    Returns ``(sprite, tw, th, pad)`` — text origin within the sprite is at
+    ``(pad, pad)`` after bbox correction. Use :func:`_blit_text_centered` /
+    :func:`_blit_text_frame_bl` to position the result on a frame.
+    """
+    stroke = 1 if bold else 0
+    r, g, b = color_bgr[2], color_bgr[1], color_bgr[0]
+
+    if letter_spacing <= 0:
+        dummy = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        d = ImageDraw.Draw(dummy)
+        bbox = d.textbbox((0, 0), text, font=font, stroke_width=stroke)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        pad = 4
+        ext_h = (underline_gap + 4) if underline else 0
+        sw = max(1, tw + 2 * pad)
+        sh = max(1, th + 2 * pad + ext_h)
+        img = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        x_text = pad - bbox[0]
+        y_text = pad - bbox[1]
+        draw.text(
+            (x_text, y_text), text, font=font, fill=(r, g, b, 255),
+            stroke_width=stroke, stroke_fill=(r, g, b, 255),
+        )
+        if underline:
+            ly = pad + th + underline_gap
+            draw.line([(pad, ly), (pad + tw, ly)], fill=(r, g, b, 255), width=2)
+        rgba = np.array(img)
+        bgra = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
+        return _to_premul(bgra), tw, th, pad
+
+    dummy = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    d = ImageDraw.Draw(dummy)
+    th = 0
+    advances: list[int] = []
+    bb_lefts: list[int] = []
+    bb_tops: list[int] = []
+    for ch in text:
+        bb = d.textbbox((0, 0), ch, font=font, stroke_width=stroke)
+        advances.append(bb[2] - bb[0])
+        bb_lefts.append(bb[0])
+        bb_tops.append(bb[1])
+        th = max(th, bb[3] - bb[1])
+    tw = sum(advances) + letter_spacing * max(0, len(text) - 1)
+    pad = 4
+    sw = max(1, tw + 2 * pad)
+    sh = max(1, th + 2 * pad)
+    img = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    x_cur = pad
+    for i, ch in enumerate(text):
+        draw.text(
+            (x_cur - bb_lefts[i], pad - bb_tops[i]), ch, font=font,
+            fill=(r, g, b, 255), stroke_width=stroke, stroke_fill=(r, g, b, 255),
+        )
+        x_cur += advances[i] + (letter_spacing if i < len(text) - 1 else 0)
+    rgba = np.array(img)
+    bgra = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
+    return _to_premul(bgra), tw, th, pad
+
+
+def _blit_text_centered(
+    frame: np.ndarray,
+    ts: tuple[np.ndarray, int, int, int],
+    cx: int,
+    cy: int,
+) -> None:
+    sprite, tw, th, pad = ts
+    _blit_bgra(frame, sprite, cx - tw // 2 - pad, cy - th // 2 - pad)
+
+
+def _blit_text_frame_bl(
+    frame: np.ndarray,
+    ts: tuple[np.ndarray, int, int, int],
+    margin_x: int,
+    margin_bottom: int,
+) -> None:
+    sprite, _tw, th, pad = ts
+    fh = frame.shape[0]
+    _blit_bgra(frame, sprite, margin_x - pad, fh - margin_bottom - th - pad)
+
+
+def _blit_text_tl(
+    frame: np.ndarray,
+    ts: tuple[np.ndarray, int, int, int],
+    x: int,
+    y: int,
+) -> None:
+    sprite, _tw, _th, pad = ts
+    _blit_bgra(frame, sprite, x - pad, y - pad)
+
+
+# ── Mixed-font hint renderer ──────────────────────────────────────────────────
+
+_ARROW_CHARS = set("↑↓←→▲▼◄►")
+
+
+def make_hint_sprite(
+    text: str,
+    base_font: ImageFont.FreeTypeFont,
+    color_bgr: tuple[int, int, int],
+    arrow_font: ImageFont.FreeTypeFont,
+) -> tuple[np.ndarray, int, int, int]:
+    """Render a hint string into a premultiplied BGRA sprite, using arrow_font
+    for chars in _ARROW_CHARS and base_font for all other chars.
+
+    Returns the same ``(sprite, tw, th, pad)`` tuple as ``_make_text_sprite``,
+    compatible with ``_blit_text_centered`` / ``_blit_text_frame_bl``.
+    """
+    r, g, b = color_bgr[2], color_bgr[1], color_bgr[0]
+    pad = 4
+
+    # Split text into consecutive runs keyed by (is_arrow).
+    if not text:
+        dummy = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+        bgra = cv2.cvtColor(np.array(dummy), cv2.COLOR_RGBA2BGRA)
+        return _to_premul(bgra), 0, 0, pad
+
+    runs: list[tuple[str, bool]] = []
+    cur_is_arrow = text[0] in _ARROW_CHARS
+    buf = text[0]
+    for ch in text[1:]:
+        is_arr = ch in _ARROW_CHARS
+        if is_arr == cur_is_arrow:
+            buf += ch
+        else:
+            runs.append((buf, cur_is_arrow))
+            buf = ch
+            cur_is_arrow = is_arr
+    runs.append((buf, cur_is_arrow))
+
+    # Measure runs on a dummy canvas to compute total width and baseline.
+    dummy = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    d = ImageDraw.Draw(dummy)
+    run_widths: list[float] = []
+    max_ascent  = 0
+    max_descent = 0
+    for run_text, is_arrow in runs:
+        font = arrow_font if is_arrow else base_font
+        w_run = d.textlength(run_text, font=font)
+        run_widths.append(w_run)
+        ascent, descent = font.getmetrics()
+        if ascent  > max_ascent:
+            max_ascent  = ascent
+        if descent > max_descent:
+            max_descent = descent
+
+    tw = int(round(sum(run_widths)))
+    th = max_ascent + max_descent   # consistent with textbbox height convention
+
+    sw = max(1, tw + 2 * pad)
+    sh = max(1, th + 2 * pad)
+    img  = Image.new("RGBA", (sw, sh), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    baseline_y = pad + max_ascent   # y coordinate of the shared baseline
+    x_cur = float(pad)
+    for (run_text, is_arrow), rw in zip(runs, run_widths):
+        font = arrow_font if is_arrow else base_font
+        draw.text((x_cur, baseline_y), run_text, font=font,
+                  fill=(r, g, b, 255), anchor="ls")
+        x_cur += rw
+
+    rgba = np.array(img)
+    bgra = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
+    return _to_premul(bgra), tw, th, pad
+
+
+# ── Per-circle sprite cache ───────────────────────────────────────────────────
+# Three layers per circle, blitted in order:
+#   1. fills_sprite   — 7 translucent segment fills + AA inner cutout
+#   2. decor_sprite   — dividers + outer/inner rings + segment labels
+#   3. arcs_sprite    — gold hover arcs (only when hover_idx != -1)
+# Layers 1 and 3 depend on (hover_idx, confirm_idx); layer 2 is fully static.
+
+_CIRCLE_DECOR_LEFT: Optional[np.ndarray]  = None
+_CIRCLE_DECOR_RIGHT: Optional[np.ndarray] = None
+_FILLS_CACHE: dict[str, tuple[Optional[tuple[int, int]], Optional[np.ndarray]]] = {
+    "left":  (None, None),
+    "right": (None, None),
+}
+_ARCS_CACHE: dict[str, tuple[Optional[int], Optional[np.ndarray]]] = {
+    "left":  (None, None),
+    "right": (None, None),
+}
+
+
+def _build_circle_decorations(
+    labels: list[str],
+    font: ImageFont.FreeTypeFont,
+    palette: dict,
+) -> np.ndarray:
+    """Static layer: dividers, outer/inner rings, labels (alpha=255 ink only)."""
+    pad = _CIRCLE_PAD
+    size = _CIRCLE_SPRITE_SIZE
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    cx = cy = RADIUS + pad
+    border = palette["border"]
+    border_rgba = (border[2], border[1], border[0], 255)
+
+    for i in range(NUM_SEGMENTS):
+        sa, _ea = _seg_angles(i)
+        theta = math.radians(sa)
+        bx = cx + RADIUS * math.cos(theta)
+        by = cy + RADIUS * math.sin(theta)
+        ix = cx + INNER_RADIUS * math.cos(theta)
+        iy = cy + INNER_RADIUS * math.sin(theta)
+        draw.line([(ix, iy), (bx, by)], fill=border_rgba, width=1)
+
+    draw.ellipse(
+        [(cx - RADIUS, cy - RADIUS), (cx + RADIUS, cy + RADIUS)],
+        outline=border_rgba, width=2,
+    )
+    draw.ellipse(
+        [(cx - INNER_RADIUS, cy - INNER_RADIUS), (cx + INNER_RADIUS, cy + INNER_RADIUS)],
+        outline=border_rgba, width=2,
+    )
+
+    mid_r = (RADIUS + INNER_RADIUS) // 2
+    text_rgba = (255, 255, 255, 255)
+    for i, label in enumerate(labels):
+        ang = _seg_mid_angle_rad(i)
+        lx = cx + mid_r * math.cos(ang)
+        ly = cy + mid_r * math.sin(ang)
+        bbox = draw.textbbox((0, 0), label, font=font, stroke_width=0)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        x = lx - tw / 2 - bbox[0]
+        y = ly - th / 2 - bbox[1]
+        draw.text((x, y), label, font=font, fill=text_rgba)
+
+    rgba = np.array(img)
+    return _to_premul(cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
+
+
+def _get_circle_decorations(side: str) -> np.ndarray:
+    global _CIRCLE_DECOR_LEFT, _CIRCLE_DECOR_RIGHT
+    if side == "left":
+        if _CIRCLE_DECOR_LEFT is None:
+            _CIRCLE_DECOR_LEFT = _build_circle_decorations(
+                ROOT_LABELS, _FONT_LG, PALETTE["left"],
+            )
+        return _CIRCLE_DECOR_LEFT
+    if _CIRCLE_DECOR_RIGHT is None:
+        _CIRCLE_DECOR_RIGHT = _build_circle_decorations(
+            TYPE_LABELS, _FONT_SM, PALETTE["right"],
+        )
+    return _CIRCLE_DECOR_RIGHT
+
+
+def _build_fills_sprite(
+    palette: dict,
+    hover_idx: int,
+    confirm_idx: int,
+) -> np.ndarray:
+    """Translucent segment fills (premultiplied) + AA inner cutout."""
+    pad = _CIRCLE_PAD
+    size = _CIRCLE_SPRITE_SIZE
+    sprite = np.zeros((size, size, 4), dtype=np.uint8)
+    cx = cy = RADIUS + pad
+
+    for i in range(NUM_SEGMENTS):
+        sa, ea = _seg_angles(i)
+        if i == confirm_idx:
+            color, alpha = palette["confirm"], ALPHA_CONFIRM
+        elif i == hover_idx:
+            color, alpha = palette["hover"], ALPHA_HOVER
+        else:
+            color, alpha = palette["base"], ALPHA_BASE
+        c4 = _premul_color(color, alpha)
+        cv2.ellipse(
+            sprite, (cx, cy), (RADIUS, RADIUS), 0, sa, ea,
+            c4, thickness=-1, lineType=cv2.LINE_AA,
+        )
+
+    cv2.circle(sprite, (cx, cy), INNER_RADIUS - 1, (0, 0, 0, 0), -1, cv2.LINE_AA)
+    return sprite
+
+
+def _get_fills_sprite(
+    side: str,
+    palette: dict,
+    hover_idx: int,
+    confirm_idx: int,
+) -> np.ndarray:
+    cached_key, cached_sprite = _FILLS_CACHE[side]
+    key = (hover_idx, confirm_idx)
+    if cached_key != key or cached_sprite is None:
+        sprite = _build_fills_sprite(palette, hover_idx, confirm_idx)
+        _FILLS_CACHE[side] = (key, sprite)
+        return sprite
+    return cached_sprite
+
+
+def _build_arcs_sprite(hover_idx: int) -> np.ndarray:
+    pad = _CIRCLE_PAD
+    size = _CIRCLE_SPRITE_SIZE
+    sprite = np.zeros((size, size, 4), dtype=np.uint8)
+    if hover_idx == -1:
+        return sprite
+    cx = cy = RADIUS + pad
+    sa, ea = _seg_angles(hover_idx)
+    gold_c4 = (_GOLD[0], _GOLD[1], _GOLD[2], 255)
+    cv2.ellipse(
+        sprite, (cx, cy), (RADIUS - 4, RADIUS - 4), 0, sa, ea,
+        gold_c4, 5, cv2.LINE_AA,
+    )
+    cv2.ellipse(
+        sprite, (cx, cy), (INNER_RADIUS + 4, INNER_RADIUS + 4), 0, sa, ea,
+        gold_c4, 4, cv2.LINE_AA,
+    )
+    return sprite
+
+
+def _get_arcs_sprite(side: str, hover_idx: int) -> np.ndarray:
+    cached_key, cached_sprite = _ARCS_CACHE[side]
+    if cached_key != hover_idx or cached_sprite is None:
+        sprite = _build_arcs_sprite(hover_idx)
+        _ARCS_CACHE[side] = (hover_idx, sprite)
+        return sprite
+    return cached_sprite
+
+
+# ── Static text sprites (lazy) ────────────────────────────────────────────────
+
+_TITLE_ROOT_TS: Optional[tuple[np.ndarray, int, int, int]] = None
+_TITLE_TYPE_TS: Optional[tuple[np.ndarray, int, int, int]] = None
+_BRAND_TEXT_TS: Optional[tuple[np.ndarray, int, int, int]] = None
+_BRAND_BADGE_BGRA: Optional[np.ndarray] = None
+
+
+def _get_title_root_ts() -> tuple[np.ndarray, int, int, int]:
+    global _TITLE_ROOT_TS
+    if _TITLE_ROOT_TS is None:
+        _TITLE_ROOT_TS = _make_text_sprite(
+            "root", _FONT_CIRCLE_HEADINGS, _GOLD, letter_spacing=3,
+        )
+    return _TITLE_ROOT_TS
+
+
+def _get_title_type_ts() -> tuple[np.ndarray, int, int, int]:
+    global _TITLE_TYPE_TS
+    if _TITLE_TYPE_TS is None:
+        _TITLE_TYPE_TS = _make_text_sprite(
+            "type", _FONT_CIRCLE_HEADINGS, _GOLD, letter_spacing=3,
+        )
+    return _TITLE_TYPE_TS
+
+
+def _get_brand_text_ts() -> tuple[np.ndarray, int, int, int]:
+    global _BRAND_TEXT_TS
+    if _BRAND_TEXT_TS is None:
+        _BRAND_TEXT_TS = _make_text_sprite(
+            BRAND_TEXT, _FONT_BRAND, (255, 255, 255),
+            letter_spacing=BRAND_LETTER_SPACING,
+        )
+    return _BRAND_TEXT_TS
+
+
+def _get_brand_badge() -> Optional[np.ndarray]:
+    """Load assets/conductor_brand.png once as a premultiplied BGRA sprite."""
+    global _BRAND_BADGE_BGRA
+    if _BRAND_BADGE_BGRA is not None:
+        return _BRAND_BADGE_BGRA
+    if not _BRAND_PNG.exists():
+        return None
+    badge = cv2.imread(str(_BRAND_PNG), cv2.IMREAD_UNCHANGED)
+    if badge is None:
+        return None
+    if badge.ndim == 3 and badge.shape[2] == 3:
+        bh, bw = badge.shape[:2]
+        alpha_ch = np.full((bh, bw, 1), 255, dtype=np.uint8)
+        badge = np.concatenate([badge, alpha_ch], axis=2)
+    elif badge.ndim != 3 or badge.shape[2] != 4:
+        return None
+    _BRAND_BADGE_BGRA = _to_premul(badge.copy())
+    return _BRAND_BADGE_BGRA
+
+
 def draw_brand_wordmark(
     frame: np.ndarray,
     margin_x: int = 14,
@@ -253,127 +731,72 @@ def draw_brand_wordmark(
     using margin_bottom as a bottom inset.
     """
     fh = frame.shape[0]
+    badge = _get_brand_badge()
+    if badge is not None:
+        bh, _bw = badge.shape[:2]
+        if strip_h > 0:
+            margin_bottom = max(strip_h // 2 - bh // 2, 4)
+        _blit_bgra(frame, badge, margin_x, fh - margin_bottom - bh)
+        return frame
+
+    ts = _get_brand_text_ts()
+    _sprite, _tw, th, _pad = ts
     if strip_h > 0:
-        # compute margin_bottom so text centre lands at strip centre
-        _dummy_img = Image.new("RGB", (1, 1))
-        _dummy_draw = ImageDraw.Draw(_dummy_img)
-        _bbox = _dummy_draw.textbbox((0, 0), BRAND_TEXT, font=_FONT_BRAND, stroke_width=0)
-        _th = _bbox[3] - _bbox[1]
-        margin_bottom = strip_h // 2 - _th // 2
-        margin_bottom = max(margin_bottom, 4)
-    if _BRAND_PNG.exists():
-        badge = cv2.imread(str(_BRAND_PNG), cv2.IMREAD_UNCHANGED)
-        if badge is None:
-            return _draw_text_pil(
-                frame,
-                BRAND_TEXT,
-                (margin_x, margin_bottom),
-                _FONT_BRAND,
-                (255, 255, 255),
-                bold=False,
-                anchor="frame_bl",
-                letter_spacing=BRAND_LETTER_SPACING,
-            )
-        fw = frame.shape[1]
-        bh, bw = badge.shape[:2]
-        y1 = fh - margin_bottom - bh
-        x1 = margin_x
-        if y1 >= 0 and x1 + bw <= fw and x1 >= 0:
-            frame = frame.copy()
-            roi = frame[y1 : y1 + bh, x1 : x1 + bw]
-            if badge.ndim == 3 and badge.shape[2] == 4:
-                a = badge[:, :, 3:4].astype(np.float32) / 255.0
-                bgr = badge[:, :, :3]
-                blended = (a * bgr + (1.0 - a) * roi).astype(np.uint8)
-                frame[y1 : y1 + bh, x1 : x1 + bw] = blended
-            elif badge.ndim == 3 and badge.shape[2] == 3:
-                frame[y1 : y1 + bh, x1 : x1 + bw] = badge
-            return frame
-    return _draw_text_pil(
-        frame,
-        BRAND_TEXT,
-        (margin_x, margin_bottom),
-        _FONT_BRAND,
-        (255, 255, 255),
-        bold=False,
-        anchor="frame_bl",
-        letter_spacing=BRAND_LETTER_SPACING,
-    )
+        margin_bottom = max(strip_h // 2 - th // 2, 4)
+    _blit_text_frame_bl(frame, ts, margin_x, margin_bottom)
+    return frame
 
 # ── Single circle renderer ────────────────────────────────────────────────────
 
 def _draw_circle(
-    frame:      np.ndarray,
-    cx:         int,
-    cy:         int,
-    labels:     list[str],
-    palette:    dict,
-    hover_idx:  int,       # segment under fingertip (-1 = none)
-    confirm_idx: int,      # currently selected segment (-1 = none)
-    font:       ImageFont.FreeTypeFont,
+    frame:       np.ndarray,
+    cx:          int,
+    cy:          int,
+    side:        str,            # "left" | "right" — picks the cached decoration sprite
+    palette:     dict,
+    hover_idx:   int,             # segment under fingertip (-1 = none)
+    confirm_idx: int,              # currently selected segment (-1 = none)
 ) -> np.ndarray:
-    overlay = frame.copy()
+    """Blit the three cached layers onto frame in place: fills → decor → arcs."""
+    pad = _CIRCLE_PAD
+    bx = cx - RADIUS - pad
+    by = cy - RADIUS - pad
+    fills = _get_fills_sprite(side, palette, hover_idx, confirm_idx)
+    decor = _get_circle_decorations(side)
+    arcs  = _get_arcs_sprite(side, hover_idx)
+    _blit_bgra(frame, fills, bx, by)
+    _blit_bgra(frame, decor, bx, by)
+    _blit_bgra(frame, arcs,  bx, by)
+    return frame
 
-    for i, label in enumerate(labels):
-        sa, ea = _seg_angles(i)
+# ── Runtime circle-size adjustment ───────────────────────────────────────────
 
-        if i == confirm_idx:
-            colour = palette["confirm"]
-            alpha  = ALPHA_CONFIRM
-        elif i == hover_idx:
-            colour = palette["hover"]
-            alpha  = ALPHA_HOVER
-        else:
-            colour = palette["base"]
-            alpha  = ALPHA_BASE
+def set_circle_size(radius: int) -> None:
+    """Update RADIUS / INNER_RADIUS at runtime and invalidate sprite caches.
 
-        # ── Filled pie slice (skip if fully transparent) ──────────────────
-        if alpha > 0.0:
-            seg_overlay = frame.copy()
-            cv2.ellipse(
-                seg_overlay, (cx, cy), (RADIUS, RADIUS),
-                0, sa, ea, colour, thickness=-1, lineType=cv2.LINE_AA,
-            )
-            cv2.addWeighted(seg_overlay, alpha, overlay, 1 - alpha, 0, overlay)
+    Call this whenever the user changes the circle-size slider.  The sprite
+    caches (decor, fills, arcs) are invalidated so they rebuild lazily at the
+    new size on the next draw_circles() call.  size changes happen at most once
+    per settings-apply, so the rebuild cost is irrelevant.
+    """
+    global RADIUS, INNER_RADIUS, _CIRCLE_SPRITE_SIZE
+    global _CIRCLE_DECOR_LEFT, _CIRCLE_DECOR_RIGHT
+    RADIUS       = int(radius)
+    INNER_RADIUS = round(radius * 60 / 190)
+    _CIRCLE_SPRITE_SIZE = 2 * RADIUS + 2 * _CIRCLE_PAD
+    # Invalidate cached sprites so they rebuild at the new size
+    _CIRCLE_DECOR_LEFT  = None
+    _CIRCLE_DECOR_RIGHT = None
+    _FILLS_CACHE["left"]  = (None, None)
+    _FILLS_CACHE["right"] = (None, None)
+    _ARCS_CACHE["left"]   = (None, None)
+    _ARCS_CACHE["right"]  = (None, None)
+    # Also reset the cached title sprites (centred above circles — position depends
+    # on radius if the caller recomputes title_y from RADIUS)
+    global _TITLE_ROOT_TS, _TITLE_TYPE_TS
+    _TITLE_ROOT_TS = None
+    _TITLE_TYPE_TS = None
 
-        # ── Segment divider lines ─────────────────────────────────────────
-        border_rad = math.radians(sa)
-        bx = int(cx + RADIUS * math.cos(border_rad))
-        by = int(cy + RADIUS * math.sin(border_rad))
-        ix = int(cx + INNER_RADIUS * math.cos(border_rad))
-        iy = int(cy + INNER_RADIUS * math.sin(border_rad))
-        cv2.line(overlay, (ix, iy), (bx, by), palette["border"], 1, cv2.LINE_AA)
-
-    # ── Restore camera pixels inside the inner circle (true transparency)──
-    # Done before drawing the inner ring so the ring outline remains crisp.
-    inner_mask = np.zeros(overlay.shape[:2], dtype=np.uint8)
-    cv2.circle(inner_mask, (cx, cy), INNER_RADIUS - 1, 255, -1, cv2.LINE_AA)
-    overlay[inner_mask > 0] = frame[inner_mask > 0]
-
-    # ── Outer and inner circle rings ──────────────────────────────────────
-    cv2.circle(overlay, (cx, cy), RADIUS,       palette["border"], 2, cv2.LINE_AA)
-    cv2.circle(overlay, (cx, cy), INNER_RADIUS, palette["border"], 2, cv2.LINE_AA)
-
-    # ── Gold arc highlight on hovered segment ─────────────────────────
-    if hover_idx != -1:
-        sa, ea = _seg_angles(hover_idx)
-        cv2.ellipse(overlay, (cx, cy), (RADIUS - 4, RADIUS - 4),
-                    0, sa, ea, _GOLD, 5, cv2.LINE_AA)
-        cv2.ellipse(overlay, (cx, cy), (INNER_RADIUS + 4, INNER_RADIUS + 4),
-                    0, sa, ea, _GOLD, 4, cv2.LINE_AA)
-
-    # ── Labels via PIL (rendered after blending so they stay crisp) ───────
-    mid_r = (RADIUS + INNER_RADIUS) // 2
-    for i, label in enumerate(labels):
-        ang = _seg_mid_angle_rad(i)
-        lx  = int(cx + mid_r * math.cos(ang))
-        ly  = int(cy + mid_r * math.sin(ang))
-
-        text_col = (255, 255, 255)   # white — visible on transparent/dark bg
-
-        overlay = _draw_text_pil(overlay, label, (lx, ly), font, text_col)
-
-    return overlay
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
@@ -405,28 +828,14 @@ def draw_circles(
     lcx, lcy = w // 4,     h // 2
     rcx, rcy = 3 * w // 4, h // 2
 
-    # Left circle — chord roots (A–G)
-    frame = _draw_circle(
-        frame, lcx, lcy, ROOT_LABELS, PALETTE["left"],
-        left_hover_idx, left_confirm_idx, _FONT_LG,
-    )
+    _draw_circle(frame, lcx, lcy, "left",  PALETTE["left"],
+                 left_hover_idx,  left_confirm_idx)
+    _draw_circle(frame, rcx, rcy, "right", PALETTE["right"],
+                 right_hover_idx, right_confirm_idx)
 
-    # Right circle — chord types
-    frame = _draw_circle(
-        frame, rcx, rcy, TYPE_LABELS, PALETTE["right"],
-        right_hover_idx, right_confirm_idx, _FONT_SM,
-    )
-
-    # ── Circle titles (Jacquard, same family as footer key row) ─────────────
     title_y = -RADIUS - 26
-    frame = _draw_text_pil(
-        frame, "root", (lcx, lcy + title_y), _FONT_CIRCLE_HEADINGS, _GOLD,
-        letter_spacing=3,
-    )
-    frame = _draw_text_pil(
-        frame, "type", (rcx, rcy + title_y), _FONT_CIRCLE_HEADINGS, _GOLD,
-        letter_spacing=3,
-    )
+    _blit_text_centered(frame, _get_title_root_ts(), lcx, lcy + title_y)
+    _blit_text_centered(frame, _get_title_type_ts(), rcx, rcy + title_y)
 
     return frame
 

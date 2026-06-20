@@ -1,0 +1,21 @@
+waveform generator. 
+
+press "o" to generate your own sounds / save them to play with your hands. 
+sine: flute like, pure and cleanly
+sawtooth: bright / buzzy
+square: retro synth
+triangle: soft and mellow
+
+customize through your own wavetable. 
+a. morph and complicated sounds
+b. add specific wave types and adjust. 
+c. the sound should have slight release
+e. be able to save your sound, where it will save in a list so that it can be played. 
+
+parsing through saved sounds. 
+a. pressing "o" takes you to edit your sounds. when clicking o, there is a opaque black screen that takes up entire screen behind the buttons / tables
+b. holding o (which is seen by a visual that draws a ring over the o and activates when the ring is complete) takes you to your sounds you saved. click on the sound to activate it. 
+c. sounds appear in a box with a white background and dissapear after clicking enter or back. 
+
+code editing implications. 
+a. doesn't respect voice leadings / b9 YET. will integrate after it is complete!

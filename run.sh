@@ -1,4 +1,3 @@
-#!/bin/bash
-set -e
-cd ~/Desktop/conductor
+
+cd ~/Desktop/springProjects/conductor
 .venv/bin/python main.py

@@ -15,10 +15,24 @@ import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 
-from ui_circles import _draw_text_pil, app_font
+from ui_circles import _draw_text_pil, _make_text_sprite, _blit_text_centered, app_font
 
 _FONT_WRIST = app_font(20)
 _FONT_DEBUG = app_font(18)
+
+# Cached wrist label sprites — "left" / "right" never change, so we render once
+# into BGRA sprites at module init and just alpha-blit them onto the frame each
+# tick instead of paying ~2 full-frame BGR↔RGB PIL roundtrips per hand.
+_WRIST_SPRITE_CACHE: dict[tuple[str, tuple[int, int, int]], tuple] = {}
+
+
+def _get_wrist_sprite(label: str, color_bgr: tuple[int, int, int]) -> tuple:
+    key = (label, color_bgr)
+    ts = _WRIST_SPRITE_CACHE.get(key)
+    if ts is None:
+        ts = _make_text_sprite(label, _FONT_WRIST, color_bgr)
+        _WRIST_SPRITE_CACHE[key] = ts
+    return ts
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -46,6 +60,14 @@ NORM_RING_PALM_FRAC  = 0.18
 
 PINCH_ON_FRAMES        = 2
 PINCH_OFF_FRAMES       = 2
+
+# If the wrist (landmark 0) moves more than this many pixels between consecutive
+# frames, treat the hand as freshly re-acquired and skip EMA smoothing for one
+# frame.  Prevents EMA "snap" artefacts when Left/Right labels swap as hands
+# cross the midline, or when a hand re-enters the frame in a different spot.
+_LM_EMA_RESET_DIST     = 80
+
+INFERENCE_SCALE = 0.5   # run MediaPipe on this fraction of the full frame size
 LANDMARK_DOT_RADIUS = 5
 ACTIVE_TIP_RADIUS   = 12
 PINCH_COLOUR        = (0, 215, 255)    # BGR gold — pinch highlight
@@ -65,6 +87,24 @@ COLOUR = {
     "Left":  {"line": (30, 30, 30), "dot": (55, 55, 55), "tip": (55, 55, 55)},
     "Right": {"line": (30, 30, 30), "dot": (55, 55, 55), "tip": (55, 55, 55)},
 }
+
+# ── Landmark colour API ───────────────────────────────────────────────────────
+
+def set_landmark_colour(bgr: tuple[int, int, int]) -> None:
+    """Set the dot/tip colour for both hands and derive a darkened line colour.
+
+    PINCH_COLOUR (gold) is left unchanged.
+    """
+    b, g, r = int(bgr[0]), int(bgr[1]), int(bgr[2])
+    # Darken for the connecting lines (multiply by ~0.45)
+    line_bgr = (b * 45 // 100, g * 45 // 100, r * 45 // 100)
+    for hand in ("Left", "Right"):
+        COLOUR[hand]["dot"]  = bgr
+        COLOUR[hand]["tip"]  = bgr
+        COLOUR[hand]["line"] = line_bgr
+    # Invalidate wrist sprite cache so it rebuilds at the new colour
+    _WRIST_SPRITE_CACHE.clear()
+
 
 # ── Data model ────────────────────────────────────────────────────────────────
 
@@ -113,25 +153,47 @@ class HandTracker:
             min_tracking_confidence=tracking_conf,
         )
         self._detector = mp_vision.HandLandmarker.create_from_options(options)
-        self._start_ms = time.time()
+        self._start_ms = time.monotonic()
+        self._last_ts_ms: int = -1
 
         self._debounce_pinch = {
             "Left":  {"active": _DebouncedSignal(), "triple": _DebouncedSignal()},
             "Right": {"active": _DebouncedSignal(), "triple": _DebouncedSignal()},
         }
 
-    def process(self, frame_bgr: Any) -> tuple[Any, list[HandData]]:
+        # Per-hand exponential moving average on the 21 pixel-space landmarks.
+        # alpha = 0.55 means "55% new + 45% previous" — kills high-frequency
+        # MediaPipe jitter (which causes hover flicker on segment boundaries)
+        # without adding noticeable latency. State resets on hand loss or when
+        # the wrist jumps more than _LM_EMA_RESET_DIST px (handles label swaps
+        # when both hands cross the screen midline).
+        self._lm_ema_alpha: float = 0.55
+        self._lm_ema_prev: dict[str, Optional[list[tuple[int, int]]]] = {
+            "Left":  None,
+            "Right": None,
+        }
+
+    def process(self, frame_bgr: Any, draw_skeleton: bool = True) -> tuple[Any, list[HandData]]:
         """
         Process a BGR frame (already mirrored).
         Left/Right are by screen position: two hands → leftmost wrist = Left;
         one hand → Left if wrist on left half of frame, else Right.
         Returns (annotated_frame, list[HandData]).
+
+        draw_skeleton : when False, bone lines, landmark dots, pinch highlights,
+                        and wrist labels are all suppressed.  HandData is still
+                        built and returned for every detected hand.
         """
         h, w = frame_bgr.shape[:2]
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        if INFERENCE_SCALE < 1.0:
+            small = cv2.resize(rgb, (int(w * INFERENCE_SCALE), int(h * INFERENCE_SCALE)))
+        else:
+            small = rgb
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=small)
 
-        timestamp_ms = int((time.time() - self._start_ms) * 1000)
+        timestamp_ms = max(int((time.monotonic() - self._start_ms) * 1000), self._last_ts_ms + 1)
+        self._last_ts_ms = timestamp_ms
         result = self._detector.detect_for_video(mp_image, timestamp_ms)
 
         hand_data_list: list[HandData] = []
@@ -167,6 +229,27 @@ class HandTracker:
             seen_labels.add(label)
             col = COLOUR[label]
 
+            # ── Landmark EMA smoothing ────────────────────────────────────
+            # Smoothing happens in pixel space only — pinch/world-distance
+            # detection still runs on raw MediaPipe landmarks below.
+            prev_smoothed = self._lm_ema_prev[label]
+            if prev_smoothed is not None and len(prev_smoothed) == len(lm_pixels):
+                pwx, pwy = prev_smoothed[0]
+                cwx, cwy = lm_pixels[0]
+                if math.hypot(cwx - pwx, cwy - pwy) > _LM_EMA_RESET_DIST:
+                    prev_smoothed = None
+            if prev_smoothed is None:
+                smoothed = lm_pixels
+            else:
+                a = self._lm_ema_alpha
+                inv = 1.0 - a
+                smoothed = [
+                    (int(a * x + inv * px), int(a * y + inv * py))
+                    for (x, y), (px, py) in zip(lm_pixels, prev_smoothed)
+                ]
+            self._lm_ema_prev[label] = smoothed
+            lm_pixels = smoothed
+
             index_tip  = lm_pixels[8]
             middle_tip = lm_pixels[12]
             ring_tip   = lm_pixels[16]
@@ -189,51 +272,46 @@ class HandTracker:
                 deb["triple"], raw_triple, PINCH_ON_FRAMES, PINCH_OFF_FRAMES,
             )
 
-            for a, b in HAND_CONNECTIONS:
-                cv2.line(frame_bgr, lm_pixels[a], lm_pixels[b],
-                         col["line"], 2, cv2.LINE_AA)
+            if draw_skeleton:
+                for a, b in HAND_CONNECTIONS:
+                    cv2.line(frame_bgr, lm_pixels[a], lm_pixels[b],
+                             col["line"], 2, cv2.LINE_8)
 
-            if pinch_triple:
-                skip = {8, 12, 16}
-            elif pinch_active:
-                skip = {8, 12}
-            else:
-                skip = {8}
-            for li, pt in enumerate(lm_pixels):
-                if li in skip:
-                    continue
-                cv2.circle(frame_bgr, pt, LANDMARK_DOT_RADIUS,
-                           col["dot"], -1, cv2.LINE_AA)
-                cv2.circle(frame_bgr, pt, LANDMARK_DOT_RADIUS,
-                           (255, 255, 255), 1, cv2.LINE_AA)
+                if pinch_triple:
+                    skip = {8, 12, 16}
+                elif pinch_active:
+                    skip = {8, 12}
+                else:
+                    skip = {8}
+                for li, pt in enumerate(lm_pixels):
+                    if li in skip:
+                        continue
+                    cv2.circle(frame_bgr, pt, LANDMARK_DOT_RADIUS,
+                               col["dot"], -1, cv2.LINE_AA)
+                    cv2.circle(frame_bgr, pt, LANDMARK_DOT_RADIUS,
+                               (255, 255, 255), 1, cv2.LINE_AA)
 
-            if pinch_triple:
-                for pt in (index_tip, middle_tip, ring_tip):
-                    cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
-                               PINCH_COLOUR, -1, cv2.LINE_AA)
-                    cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
+                if pinch_triple:
+                    for pt in (index_tip, middle_tip, ring_tip):
+                        cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
+                                   PINCH_COLOUR, -1, cv2.LINE_AA)
+                        cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
+                                   (255, 255, 255), 2, cv2.LINE_AA)
+                elif pinch_active:
+                    for pt in (index_tip, middle_tip):
+                        cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
+                                   PINCH_COLOUR, -1, cv2.LINE_AA)
+                        cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
+                                   (255, 255, 255), 2, cv2.LINE_AA)
+                else:
+                    cv2.circle(frame_bgr, index_tip, ACTIVE_TIP_RADIUS,
+                               col["tip"], -1, cv2.LINE_AA)
+                    cv2.circle(frame_bgr, index_tip, ACTIVE_TIP_RADIUS,
                                (255, 255, 255), 2, cv2.LINE_AA)
-            elif pinch_active:
-                for pt in (index_tip, middle_tip):
-                    cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
-                               PINCH_COLOUR, -1, cv2.LINE_AA)
-                    cv2.circle(frame_bgr, pt, ACTIVE_TIP_RADIUS,
-                               (255, 255, 255), 2, cv2.LINE_AA)
-            else:
-                cv2.circle(frame_bgr, index_tip, ACTIVE_TIP_RADIUS,
-                           col["tip"], -1, cv2.LINE_AA)
-                cv2.circle(frame_bgr, index_tip, ACTIVE_TIP_RADIUS,
-                           (255, 255, 255), 2, cv2.LINE_AA)
 
-            wrist = lm_pixels[0]
-            frame_bgr = _draw_text_pil(
-                frame_bgr,
-                label.lower(),
-                (wrist[0], wrist[1] + 26),
-                _FONT_WRIST,
-                col["dot"],
-                anchor="center",
-            )
+                wrist = lm_pixels[0]
+                wrist_ts = _get_wrist_sprite(label.lower(), tuple(col["dot"]))
+                _blit_text_centered(frame_bgr, wrist_ts, wrist[0], wrist[1] + 26)
 
             hand_data_list.append(HandData(
                 label=label,
@@ -250,6 +328,7 @@ class HandTracker:
             if lbl not in seen_labels:
                 _reset_debounced_signal(self._debounce_pinch[lbl]["active"])
                 _reset_debounced_signal(self._debounce_pinch[lbl]["triple"])
+                self._lm_ema_prev[lbl] = None
 
         return frame_bgr, hand_data_list
 
@@ -337,7 +416,54 @@ def _reset_debounced_signal(state: _DebouncedSignal) -> None:
 # ── Standalone test ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    cap = cv2.VideoCapture(0)
+    import os as _os, platform as _platform, subprocess as _subprocess, re as _re
+
+    def _pick_cam() -> int:
+        raw = _os.environ.get("CONDUCTOR_CAM_INDEX", "").strip()
+        if raw.isdigit():
+            return int(raw)
+        if _platform.system() != "Darwin":
+            return 0
+        try:
+            proc = _subprocess.run(
+                ["ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", ""],
+                capture_output=True, text=True, timeout=8, check=False,
+            )
+            lines = (proc.stderr or "").splitlines()
+        except (FileNotFoundError, _subprocess.TimeoutExpired):
+            return 0
+        section = False
+        devices: list[tuple[int, str]] = []
+        for line in lines:
+            if "AVFoundation video devices" in line:
+                section = True; continue
+            if "AVFoundation audio devices" in line:
+                break
+            if not section:
+                continue
+            m = _re.search(r"\[(\d+)\]\s+(.*)", line)
+            if m:
+                devices.append((int(m.group(1)), m.group(2).strip()))
+        has_iphone = any(
+            "iphone" in n.lower() or "continuity" in n.lower() for _, n in devices
+        )
+        if not has_iphone:
+            return 0
+        # iPhone present — probe OpenCV indices, prefer the narrower (non-iPhone) camera
+        probe: list[tuple[int, int]] = []
+        for ci in range(4):
+            cap_p = cv2.VideoCapture(ci)
+            if cap_p.isOpened():
+                w = int(cap_p.get(cv2.CAP_PROP_FRAME_WIDTH))
+                if w > 0:
+                    probe.append((ci, w))
+            cap_p.release()
+        for ci, w in probe:
+            if w < 1920:
+                return ci
+        return 0
+
+    cap = cv2.VideoCapture(_pick_cam())
     tracker = HandTracker()
     print("Hand Tracker running — press Q to quit")
 
